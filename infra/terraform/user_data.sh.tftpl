@@ -1,0 +1,13 @@
+#!/bin/bash
+# Cloud-init: install Docker + tooling and clone the bench repository. Log: /var/log/bench-setup.log
+set -euxo pipefail
+exec > /var/log/bench-setup.log 2>&1
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y docker.io docker-compose-v2 git python3-venv tmux
+systemctl enable --now docker
+usermod -aG docker ubuntu
+sudo -u ubuntu git clone "${repo_url}" /home/ubuntu/learning-event-bench
+sudo -u ubuntu python3 -m venv /home/ubuntu/learning-event-bench/.venv
+sudo -u ubuntu /home/ubuntu/learning-event-bench/.venv/bin/pip install -r /home/ubuntu/learning-event-bench/analysis/requirements.txt
+touch /home/ubuntu/BENCH_READY

@@ -1,5 +1,5 @@
 {
-  "name": "interactive-learning-broker-bench",
+  "name": "learning-event-bench",
   "version": "0.1.0",
   "private": true,
   "description": "Experimental stand: latency and reliability of Redis Pub/Sub, Redis Streams and Apache Kafka for Yjs-based interactive learning sessions",

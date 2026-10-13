@@ -1,4 +1,4 @@
-# Interactive Learning Broker Bench
+# learning-event-bench
 
 Experimental stand for the article *"Queueing and Reliability Model of Real-Time Synchronisation in Scalable
 Interactive Learning Environments: Experimental Validation for Redis Pub/Sub, Redis Streams and Apache Kafka"*
@@ -26,6 +26,7 @@ test/
 experiments/         make_matrix.py (randomised run plan), run_matrix.sh (Docker), smoke-local.sh (no Docker)
 analysis/            model.py (M/G/1, M/M/1, reliability formulas, minimal window L*), analyze.py (statistics)
 docs/                EC2.md (step-by-step AWS run), adr/ (architecture decisions)
+infra/terraform/     Optional Terraform for the EC2 instance (see its README)
 ```
 
 Dependency rule: source dependencies point inwards only (`apps -> adapters -> application -> domain`),

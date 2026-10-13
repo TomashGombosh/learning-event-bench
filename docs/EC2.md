@@ -1,8 +1,19 @@
 # Running the experiment on AWS EC2 (on demand)
 
-Nothing in this repository creates AWS resources; all steps below are performed by you.
+Nothing is created in AWS automatically; all steps below are performed by you.
+Two options: **A) Terraform** (`infra/terraform`, recommended) or **B) manual** console setup (sections 1–2).
 
-## 1. Instance
+## 0. Option A: Terraform
+```bash
+cd infra/terraform && cp terraform.tfvars.example terraform.tfvars   # my_ip, public_key, repo_url
+terraform init && terraform apply
+ssh ubuntu@$(terraform output -raw public_ip)
+test -f ~/BENCH_READY && cd ~/learning-event-bench && docker compose build
+```
+Docker, the repo clone and the Python venv are prepared by cloud-init; continue with section 3.
+After the run: copy results, then `terraform destroy` (section 5).
+
+## 1. Option B: manual instance
 - Recommended: **c7i.4xlarge** (16 vCPU, 32 GiB), region eu-central-1 (Frankfurt), Ubuntu 24.04 LTS, 50 GiB gp3.
   On-demand Linux price on 13.10.2026 (AWS price list, EU Frankfurt): **$0.8148/h**.
   A full matrix (~12 h) therefore costs ≈ **$10** compute (+ a few cents of EBS for the days the volume exists).
@@ -15,7 +26,7 @@ Nothing in this repository creates AWS resources; all steps below are performed 
 ```bash
 sudo apt-get update && sudo apt-get install -y docker.io docker-compose-v2 git python3-venv
 sudo usermod -aG docker $USER && newgrp docker
-git clone https://github.com/<you>/interactive-learning-broker-bench.git && cd interactive-learning-broker-bench
+git clone https://github.com/<you>/learning-event-bench.git && cd learning-event-bench
 docker compose build
 python3 -m venv .venv && .venv/bin/pip install -r analysis/requirements.txt
 ```
@@ -39,6 +50,6 @@ python3 experiments/make_matrix.py
 ## 5. Collect results and stop paying
 ```bash
 .venv/bin/python analysis/analyze.py results experiments/configs/matrix.csv
-tar czf results.tgz results     # then on your laptop: scp ubuntu@<ip>:~/interactive-learning-broker-bench/results.tgz .
+tar czf results.tgz results     # then on your laptop: scp ubuntu@<ip>:~/learning-event-bench/results.tgz .
 ```
-**Terminate the instance** (and delete the EBS volume if it was not set to delete on termination).
+**Stop paying:** Terraform: `cd infra/terraform && terraform destroy`. Manual: terminate the instance (and delete the EBS volume if it was not set to delete on termination).
