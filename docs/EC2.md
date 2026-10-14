@@ -1,16 +1,19 @@
 # Running the experiment on AWS EC2 (on demand)
 
 Nothing is created in AWS automatically; all steps below are performed by you.
-Two options: **A) Terraform** (`infra/terraform`, recommended) or **B) manual** console setup (sections 1–2).
+Recommended: fully automated runs via GitHub Actions, see [AUTOMATION.md](AUTOMATION.md).
+Alternatives: **A) Terraform by hand** (`infra/terraform`, now with remote state, see its README) or **B) manual** console setup (sections 1–2).
 
 ## 0. Option A: Terraform
 ```bash
-cd infra/terraform && cp terraform.tfvars.example terraform.tfvars   # my_ip, public_key, repo_url
-terraform init && terraform apply
+cd infra/terraform && cp terraform.tfvars.example terraform.tfvars   # results_bucket, run_id, my_ip, public_key
+terraform init -backend-config="bucket=<prefix>-tfstate" -backend-config="key=bench/terraform.tfstate" -backend-config="region=eu-central-1"
+terraform apply
 ssh ubuntu@$(terraform output -raw public_ip)
 test -f ~/BENCH_READY && cd ~/learning-event-bench && docker compose build
 ```
-Docker, the repo clone and the Python venv are prepared by cloud-init; continue with section 3.
+Note: with this Terraform the instance starts the full matrix automatically (systemd `leb-bench`) and uploads to S3;
+sections 3–4 are only needed for manual runs (`sudo systemctl stop leb-bench` first).
 After the run: copy results, then `terraform destroy` (section 5).
 
 ## 1. Option B: manual instance

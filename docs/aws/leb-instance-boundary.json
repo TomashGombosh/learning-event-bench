@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "MaxPermissionsOfInstanceRole",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:AbortMultipartUpload", "s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::<RESULTS_BUCKET>", "arn:aws:s3:::<RESULTS_BUCKET>/runs/*"]
+    }
+  ]
+}

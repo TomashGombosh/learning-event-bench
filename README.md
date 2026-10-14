@@ -65,7 +65,7 @@ python3 experiments/make_matrix.py          # 128 randomised runs (stages A, B, 
 .venv/bin/python analysis/analyze.py results experiments/configs/matrix.csv
 ```
 
-See [docs/EC2.md](docs/EC2.md) for a step-by-step AWS guide.
+See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Actions + OIDC + Terraform, results in S3, auto-destroy after 41 h) and [docs/EC2.md](docs/EC2.md) for manual runs.
 
 ### Configuration (environment variables)
 

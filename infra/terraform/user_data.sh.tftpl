@@ -1,13 +1,65 @@
 #!/bin/bash
-# Cloud-init: install Docker + tooling and clone the bench repository. Log: /var/log/bench-setup.log
+# Cloud-init: install tooling, clone the repo at the requested commit, start the benchmark under systemd.
 set -euxo pipefail
-exec > /var/log/bench-setup.log 2>&1
+exec > /var/log/leb-setup.log 2>&1
+
+# Second line of defence: hard stop after max_runtime_minutes; shutdown behaviour = terminate.
+shutdown -h +${max_runtime_minutes} "learning-event-bench safety timeout"
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y docker.io docker-compose-v2 git python3-venv tmux
+apt-get install -y docker.io docker-compose-v2 git python3-venv tmux unzip curl
+curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
 systemctl enable --now docker
 usermod -aG docker ubuntu
+
 sudo -u ubuntu git clone "${repo_url}" /home/ubuntu/learning-event-bench
+sudo -u ubuntu git -C /home/ubuntu/learning-event-bench checkout "${git_ref}"
+GIT_SHA=$(git -C /home/ubuntu/learning-event-bench rev-parse HEAD)
 sudo -u ubuntu python3 -m venv /home/ubuntu/learning-event-bench/.venv
-sudo -u ubuntu /home/ubuntu/learning-event-bench/.venv/bin/pip install -r /home/ubuntu/learning-event-bench/analysis/requirements.txt
-touch /home/ubuntu/BENCH_READY
+sudo -u ubuntu /home/ubuntu/learning-event-bench/.venv/bin/pip install -q -r /home/ubuntu/learning-event-bench/analysis/requirements.txt
+
+mkdir -p /etc/leb /opt/leb
+cat > /etc/leb/bench.env <<ENV
+RESULTS_BUCKET=${results_bucket}
+RUN_ID=${run_id}
+BENCH_REPS=${bench_reps}
+BENCH_DURATION_S=${bench_duration_s}
+AWS_REGION=${region}
+GIT_SHA=$GIT_SHA
+ENV
+install -m 755 /home/ubuntu/learning-event-bench/infra/instance/run-bench.sh /opt/leb/run-bench.sh
+install -m 755 /home/ubuntu/learning-event-bench/infra/instance/sync-results.sh /opt/leb/sync-results.sh
+
+cat > /etc/systemd/system/leb-bench.service <<UNIT
+[Unit]
+Description=learning-event-bench experiment matrix
+After=docker.service network-online.target
+Requires=docker.service
+[Service]
+Type=simple
+ExecStart=/opt/leb/run-bench.sh
+Restart=no
+[Install]
+WantedBy=multi-user.target
+UNIT
+cat > /etc/systemd/system/leb-sync.service <<UNIT
+[Unit]
+Description=Upload learning-event-bench results to S3
+[Service]
+Type=oneshot
+ExecStart=/opt/leb/sync-results.sh
+UNIT
+cat > /etc/systemd/system/leb-sync.timer <<UNIT
+[Unit]
+Description=Periodic S3 sync of benchmark results
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now leb-sync.timer
+systemctl enable --now leb-bench.service

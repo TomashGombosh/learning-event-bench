@@ -1,4 +1,6 @@
-my_ip      = "203.0.113.10/32"            # curl -s https://checkip.amazonaws.com  -> add /32
-public_key = "ssh-ed25519 AAAA... you@laptop"
-repo_url   = "https://github.com/<your-account>/learning-event-bench.git"
-# instance_type = "m7i.2xlarge"           # budget option
+results_bucket = "leb-tomash-results"   # output of the bootstrap stack
+run_id         = "manual-20261017"
+# git_ref       = "main"
+# bench_reps    = 5
+# my_ip         = "203.0.113.10/32"     # optional SSH for debugging
+# public_key    = "ssh-ed25519 AAAA..."

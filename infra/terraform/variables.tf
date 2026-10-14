@@ -10,34 +10,66 @@ variable "instance_type" {
   default     = "c7i.4xlarge"
 }
 
-variable "my_ip" {
-  description = "Your public IPv4 address in CIDR form, e.g. 203.0.113.10/32. Only this address may SSH in."
+variable "results_bucket" {
+  description = "Name of the results bucket created by the bootstrap stack."
   type        = string
-  validation {
-    condition     = can(cidrhost(var.my_ip, 0))
-    error_message = "my_ip must be a CIDR block such as 203.0.113.10/32."
-  }
 }
 
-variable "key_name" {
-  description = "Name of the EC2 key pair to create."
-  type        = string
-  default     = "learning-event-bench"
-}
-
-variable "public_key" {
-  description = "SSH public key material (contents of e.g. ~/.ssh/id_ed25519.pub)."
+variable "run_id" {
+  description = "Identifier of this benchmark run; results go to s3://<results_bucket>/runs/<run_id>/."
   type        = string
 }
 
 variable "repo_url" {
-  description = "Git URL of the learning-event-bench repository to clone on the instance."
+  description = "Git URL of the repository to clone on the instance (must be publicly readable)."
   type        = string
-  default     = "https://github.com/<your-account>/learning-event-bench.git"
+  default     = "https://github.com/TomashGombosh/learning-event-bench.git"
+}
+
+variable "git_ref" {
+  description = "Commit SHA or branch to check out on the instance."
+  type        = string
+  default     = "main"
+}
+
+variable "bench_reps" {
+  description = "Repetitions per matrix cell (5 -> 128 runs, ~12 h)."
+  type        = number
+  default     = 5
+}
+
+variable "bench_duration_s" {
+  description = "Measurement window per run, seconds."
+  type        = number
+  default     = 240
+}
+
+variable "max_runtime_minutes" {
+  description = "Safety timeout: the instance powers off (and terminates) after this many minutes."
+  type        = number
+  default     = 2460 # 41 h
 }
 
 variable "volume_size_gb" {
   description = "Root EBS gp3 volume size in GiB."
   type        = number
   default     = 50
+}
+
+variable "my_ip" {
+  description = "Optional: your IPv4 CIDR for SSH debugging (e.g. 203.0.113.10/32). Empty = no inbound access."
+  type        = string
+  default     = ""
+}
+
+variable "public_key" {
+  description = "Optional: SSH public key for debugging. Empty = no key pair."
+  type        = string
+  default     = ""
+}
+
+variable "permissions_boundary_arn" {
+  description = "Optional IAM permissions boundary for the instance role (recommended; required by the deploy policy in docs/aws)."
+  type        = string
+  default     = null
 }

@@ -1,0 +1,82 @@
+name: bench-down
+
+on:
+  schedule:
+    - cron: "17 * * * *" # hourly check
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Destroy now regardless of age
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: bench-infra
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+  MAX_AGE_HOURS: "41"
+  TF_IN_AUTOMATION: "1"
+
+jobs:
+  down:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: bench-down-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.3
+          terraform_wrapper: false
+
+      - name: Terraform init (remote state)
+        run: >
+          terraform init -input=false
+          -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          -backend-config="key=bench/terraform.tfstate"
+          -backend-config="region=${AWS_REGION}"
+
+      - name: Decide
+        id: decide
+        env:
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          if ! terraform state list 2>/dev/null | grep -q '^aws_instance.bench$'; then
+            echo "No bench infrastructure in state."; echo "destroy=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          INSTANCE_ID=$(terraform output -raw instance_id)
+          CREATED=$(terraform output -raw created_at)
+          STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo missing)
+          AGE_H=$(( ( $(date -u +%s) - $(date -u -d "$CREATED" +%s) ) / 3600 ))
+          echo "instance=$INSTANCE_ID state=$STATE created=$CREATED age=${AGE_H}h force=$FORCE"
+          if [ "$FORCE" = "true" ] || [ "$AGE_H" -ge "$MAX_AGE_HOURS" ] \
+             || [ "$STATE" = "terminated" ] || [ "$STATE" = "shutting-down" ] || [ "$STATE" = "stopped" ] || [ "$STATE" = "missing" ]; then
+            echo "destroy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "destroy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Terraform destroy
+        if: steps.decide.outputs.destroy == 'true'
+        run: |
+          terraform destroy -input=false -auto-approve \
+            -var "region=${AWS_REGION}" \
+            -var "results_bucket=${{ vars.RESULTS_BUCKET }}" \
+            -var "permissions_boundary_arn=${{ vars.PERMISSIONS_BOUNDARY_ARN }}" \
+            -var "run_id=$(terraform output -raw run_id 2>/dev/null || echo destroy)"
+          echo "### Bench infrastructure destroyed" >> "$GITHUB_STEP_SUMMARY"

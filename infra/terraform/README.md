@@ -1,32 +1,19 @@
-# Terraform: one EC2 instance for learning-event-bench
+# Terraform for learning-event-bench
 
-Creates in `eu-central-1` (default): an Ubuntu 24.04 instance (`c7i.4xlarge` by default), a key pair from your
-public key, a security group allowing **only SSH from `var.my_ip`**, and an encrypted 50 GiB gp3 root volume
-(deleted with the instance). Cloud-init installs Docker, Docker Compose v2, tmux and Python venv, and clones
-`var.repo_url` into `/home/ubuntu/learning-event-bench`.
+- `bootstrap/` — long-lived S3 buckets for Terraform state (S3-native locking) and results. Apply once locally.
+- `.` (this folder) — one benchmark run: EC2 instance (default c7i.4xlarge, Ubuntu 24.04), security group (outbound only;
+  optional SSH from `my_ip`), encrypted 50 GiB gp3 volume, IAM instance profile that may only write to
+  `s3://<results>/runs/<run_id>/`. `user_data` clones the repo at `git_ref`, starts the matrix under systemd, syncs results
+  to S3 every 10 min, writes `DONE.json`, then self-terminates. Safety timeout: `shutdown -h +2460` with
+  `instance_initiated_shutdown_behavior = terminate`.
 
-Cost (on-demand Linux, EU Frankfurt, AWS price list 13.10.2026): c7i.4xlarge $0.8148/h, m7i.2xlarge $0.483/h.
+Normally applied/destroyed by GitHub Actions (`bench-up`, `bench-down`), see `docs/AUTOMATION.md`.
 
-## Prerequisites
-- Terraform >= 1.5, AWS credentials configured (`aws configure` or environment variables), permissions for EC2.
-- The repository must be reachable from the instance (public, or use an HTTPS URL with a token).
-
-## Create
+## Manual use
 ```bash
-cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars   # fill my_ip, public_key, repo_url
-terraform init
-terraform plan
+terraform init -backend-config="bucket=<prefix>-tfstate" -backend-config="key=bench/terraform.tfstate" -backend-config="region=eu-central-1"
+cp terraform.tfvars.example terraform.tfvars   # results_bucket, run_id, optional SSH
 terraform apply
-terraform output ssh_command
+terraform destroy                               # always, after the results are in S3
 ```
-Wait 3–5 minutes until `/home/ubuntu/BENCH_READY` exists (`tail -f /var/log/bench-setup.log`), then follow
-`docs/EC2.md` from step 3 (pilot).
-
-## Destroy (do not forget: billing is per second while the instance exists)
-```bash
-# first copy the results to your laptop:
-scp ubuntu@$(terraform output -raw public_ip):~/learning-event-bench/results.tgz .
-terraform destroy
-```
-`terraform.tfvars` and `*.tfstate` are git-ignored; keep the state until `destroy` has completed.
+Requires Terraform >= 1.10 (S3 native state locking).

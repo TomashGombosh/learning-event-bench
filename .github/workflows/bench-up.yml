@@ -1,0 +1,95 @@
+name: bench-up
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: EC2 instance type
+        default: c7i.4xlarge
+        type: string
+      bench_reps:
+        description: Repetitions per matrix cell (5 = 128 runs, about 12 h)
+        default: "5"
+        type: string
+      bench_duration_s:
+        description: Measurement window per run (seconds)
+        default: "240"
+        type: string
+  # Optional: weekly start (Saturday 20:00 UTC). Uncomment to enable.
+  # schedule:
+  #   - cron: "0 20 * * 6"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: bench-infra
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+  TF_IN_AUTOMATION: "1"
+
+jobs:
+  up:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: bench-up-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.3
+
+      - name: Terraform init (remote state)
+        run: >
+          terraform init -input=false
+          -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          -backend-config="key=bench/terraform.tfstate"
+          -backend-config="region=${AWS_REGION}"
+
+      - name: Refuse to start if a bench instance already exists
+        run: |
+          if terraform state list 2>/dev/null | grep -q '^aws_instance.bench$'; then
+            echo "::error::A bench instance already exists in state. Run bench-down first."
+            exit 1
+          fi
+
+      - name: Terraform apply
+        env:
+          INSTANCE_TYPE: ${{ inputs.instance_type || 'c7i.4xlarge' }}
+          BENCH_REPS: ${{ inputs.bench_reps || '5' }}
+          BENCH_DURATION_S: ${{ inputs.bench_duration_s || '240' }}
+        run: |
+          RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA::7}"
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          terraform apply -input=false -auto-approve \
+            -var "region=${AWS_REGION}" \
+            -var "instance_type=${INSTANCE_TYPE}" \
+            -var "results_bucket=${{ vars.RESULTS_BUCKET }}" \
+            -var "permissions_boundary_arn=${{ vars.PERMISSIONS_BOUNDARY_ARN }}" \
+            -var "run_id=${RUN_ID}" \
+            -var "git_ref=${GITHUB_SHA}" \
+            -var "bench_reps=${BENCH_REPS}" \
+            -var "bench_duration_s=${BENCH_DURATION_S}" \
+            -var "max_runtime_minutes=2460"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Bench started"
+            echo "- run id: \`${RUN_ID}\`"
+            echo "- instance: \`$(terraform output -raw instance_id)\`"
+            echo "- created at: $(terraform output -raw created_at)"
+            echo "- results: $(terraform output -raw results_prefix)"
+            echo "- automatic destroy by bench-down after 41 h (instance self-terminates at 41 h as well)"
+          } >> "$GITHUB_STEP_SUMMARY"

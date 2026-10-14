@@ -1,0 +1,50 @@
+name: bench-results
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Run id (folder under s3://<results-bucket>/runs/); empty = latest
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: bench-results-${{ github.run_id }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download and analyse
+        env:
+          RESULTS_BUCKET: ${{ vars.RESULTS_BUCKET }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          pip install -q -r analysis/requirements.txt
+          ./experiments/fetch_results.sh "$RUN_ID"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            results/_analysis/
+            results/run-metadata.json
+            results/matrix.csv
+            results/run.log
+          if-no-files-found: warn
