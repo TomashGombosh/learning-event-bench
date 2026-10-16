@@ -37,6 +37,7 @@ rows.sort(key=lambda r: r["stage"] != "A")
 for i, r in enumerate(rows):
     r["run_id"] = f"{i:03d}-{r['stage']}-{r['broker']}-L{r['load']}-nu{r['disconnects_per_min']}-k{r['gateway_kill']}-r{r['rep']}"
 with open("configs/matrix.csv", "w", newline="") as f:
-    w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+    # Default csv lineterminator is \r\n. bash `read` then keeps a trailing CR on run_id.
+    w = csv.DictWriter(f, fieldnames=list(rows[0].keys()), lineterminator="\n")
     w.writeheader(); w.writerows(rows)
 print(f"{len(rows)} runs written to configs/matrix.csv")

@@ -4,6 +4,11 @@
 set -euxo pipefail
 set -E
 
+# cloud-init runs this script with a sparse environment: HOME is unset (git config
+# --global dies with "fatal: $HOME not set") and PATH may omit /usr/local/bin.
+export HOME=/root
+export PATH="/usr/local/sbin:/usr/local/bin:$${PATH:-/usr/sbin:/usr/bin:/sbin:/bin}"
+
 RESULTS_BUCKET="${results_bucket}"
 RUN_ID="${run_id}"
 AWS_REGION="${region}"
@@ -150,11 +155,12 @@ sudo -Hu ubuntu git clone "${repo_url}" /home/ubuntu/learning-event-bench
 sudo -Hu ubuntu git -C /home/ubuntu/learning-event-bench checkout "${git_ref}"
 GIT_SHA=$(sudo -Hu ubuntu git -C /home/ubuntu/learning-event-bench rev-parse HEAD)
 # BuildKit (root, via leb-bench.service) reads git metadata from this repo.
-if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF '*'; then
-  git config --global --add safe.directory '*'
+# --system writes /etc/gitconfig and does not need HOME (cloud-init leaves it unset).
+if ! git config --system --get-all safe.directory 2>/dev/null | grep -qxF '*'; then
+  git config --system --add safe.directory '*'
 fi
-if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF /home/ubuntu/learning-event-bench; then
-  git config --global --add safe.directory /home/ubuntu/learning-event-bench
+if ! git config --system --get-all safe.directory 2>/dev/null | grep -qxF /home/ubuntu/learning-event-bench; then
+  git config --system --add safe.directory /home/ubuntu/learning-event-bench
 fi
 sudo -Hu ubuntu python3 -m venv /home/ubuntu/learning-event-bench/.venv
 sudo -Hu ubuntu /home/ubuntu/learning-event-bench/.venv/bin/pip install -q -r /home/ubuntu/learning-event-bench/analysis/requirements.txt
@@ -183,6 +189,7 @@ OnFailure=leb-bench-failed.service
 Type=simple
 User=root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/root
 EnvironmentFile=/etc/leb/bench.env
 ExecStart=/opt/leb/run-bench.sh
 Restart=no
@@ -196,6 +203,7 @@ Description=Upload bench failure logs and power off
 Type=oneshot
 User=root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/root
 EnvironmentFile=-/etc/leb/bench.env
 ExecStart=/opt/leb/bench-failed.sh
 UNIT
@@ -206,6 +214,7 @@ Description=Upload learning-event-bench results to S3
 Type=oneshot
 User=root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/root
 EnvironmentFile=/etc/leb/bench.env
 ExecStart=/opt/leb/sync-results.sh
 UNIT

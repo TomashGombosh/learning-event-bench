@@ -13,6 +13,10 @@ NETEM=${NETEM:-"delay 10ms 5ms distribution normal"}
 export NETEM
 
 tail -n +2 "$MATRIX" | while IFS=, read -r stage broker load rooms clients rate nu kill rep run_id; do
+  # make_matrix used to write CRLF; a trailing CR becomes part of the directory name.
+  stage=${stage%$'\r'}; broker=${broker%$'\r'}; load=${load%$'\r'}; rooms=${rooms%$'\r'}
+  clients=${clients%$'\r'}; rate=${rate%$'\r'}; nu=${nu%$'\r'}; kill=${kill%$'\r'}
+  rep=${rep%$'\r'}; run_id=${run_id%$'\r'}
   if [ -d "results/$run_id" ] && ls results/$run_id/shard-*/summary.json >/dev/null 2>&1; then echo "skip $run_id"; continue; fi
   echo "=== $run_id ($(date -Is))"
   export BROKER=$broker
@@ -22,7 +26,7 @@ tail -n +2 "$MATRIX" | while IFS=, read -r stage broker load rooms clients rate 
   if [ "$kill" = "1" ]; then (sleep $((KILL_AT_S)); docker compose kill gateway2 >/dev/null; echo "killed gateway2") & fi
   pids=()
   for ((s = 0; s < SHARDS; s++)); do
-    docker compose --profile load run --rm --no-build \
+    docker compose --profile load run --rm --pull never \
       -e RUN_ID="$run_id" -e BROKER_LABEL="$broker" -e ROOMS="$rooms" -e CLIENTS_PER_ROOM="$clients" \
       -e RATE_PER_CLIENT="$rate" -e DISCONNECTS_PER_MIN="$nu" -e MEAN_OFFLINE_S=2 \
       -e WARMUP_S="$WARMUP_S" -e DURATION_S="$DURATION_S" -e DRAIN_S="$DRAIN_S" \
@@ -32,6 +36,9 @@ tail -n +2 "$MATRIX" | while IFS=, read -r stage broker load rooms clients rate 
   done
   wait "${pids[@]}" || echo "WARNING: a shard failed in $run_id"
   wait
+  # A failed shard never creates the directory. The redirect itself then exits the
+  # script under set -e, and `|| true` does not cover a failed redirection.
+  mkdir -p "results/$run_id"
   docker compose logs --no-color gateway1 gateway2 gateway3 > "results/$run_id/gateways.log" 2>&1 || true
 done
 docker compose down -v --remove-orphans
