@@ -67,11 +67,12 @@ write_meta running
 /opt/leb/sync-results.sh
 # Root (see leb-bench.service). docker.sock does not use the ubuntu docker group.
 # BuildKit records git metadata; the repo is owned by ubuntu, so root needs safe.directory.
-if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF '*'; then
-  git config --global --add safe.directory '*'
+# --system does not need HOME (systemd still sets HOME=/root on the unit).
+if ! git config --system --get-all safe.directory 2>/dev/null | grep -qxF '*'; then
+  git config --system --add safe.directory '*'
 fi
-if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$REPO"; then
-  git config --global --add safe.directory "$REPO"
+if ! git config --system --get-all safe.directory 2>/dev/null | grep -qxF "$REPO"; then
+  git config --system --add safe.directory "$REPO"
 fi
 if ! docker compose version >/dev/null 2>&1; then
   echo "docker compose plugin is not on PATH"
