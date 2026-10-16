@@ -48,19 +48,39 @@ write_meta() {
 JSON
 }
 
+on_exit() {
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  echo "leb-bench failed (exit $rc)"
+  write_meta failed || true
+  if [ -x /opt/leb/bench-failed.sh ]; then
+    /opt/leb/bench-failed.sh || true
+  else
+    "$REPO/infra/instance/bench-failed.sh" || true
+  fi
+}
+trap on_exit EXIT
+
 write_meta running
 /opt/leb/sync-results.sh
 # Root (see leb-bench.service). docker.sock does not use the ubuntu docker group.
+# BuildKit records git metadata; the repo is owned by ubuntu, so root needs safe.directory.
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF '*'; then
+  git config --global --add safe.directory '*'
+fi
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$REPO"; then
+  git config --global --add safe.directory "$REPO"
+fi
 if ! docker compose version >/dev/null 2>&1; then
   echo "docker compose plugin is not on PATH"
-  write_meta failed || true
-  /opt/leb/sync-results.sh || true
   exit 1
 fi
-if ! docker compose build; then
+# Only gateway1 has `build:`. Building every service tags the same image in parallel
+# and BuildKit fails with "image already exists".
+if ! docker compose build gateway1; then
   echo "docker compose build failed"
-  write_meta failed || true
-  /opt/leb/sync-results.sh || true
   exit 1
 fi
 (cd experiments && python3 make_matrix.py "${BENCH_REPS}")
