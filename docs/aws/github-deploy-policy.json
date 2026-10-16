@@ -47,7 +47,7 @@
       "Effect": "Deny",
       "Action": "ec2:RunInstances",
       "Resource": "arn:aws:ec2:*:*:instance/*",
-      "Condition": { "StringNotEquals": { "ec2:InstanceType": ["c7i.large", "c7i.xlarge", "c7i.2xlarge", "c7i.4xlarge", "c7g.2xlarge", "m7i.2xlarge", "m7i.4xlarge"] } }
+      "Condition": { "StringNotEquals": { "ec2:InstanceType": ["c7i.large", "c7i.xlarge", "c7i.2xlarge", "c7i.4xlarge", "c7g.large", "c7g.xlarge", "c7g.2xlarge", "c7g.4xlarge", "m7i.2xlarge", "m7i.4xlarge"] } }
     },
     {
       "Sid": "Ec2DeleteOnlyProjectResources",

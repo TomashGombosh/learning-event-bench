@@ -5,9 +5,9 @@ variable "region" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type (c7i.4xlarge: 16 vCPU / 32 GiB; budget option m7i.2xlarge)."
+  description = "EC2 instance type. Default c7g.2xlarge (Graviton3, 8 vCPU / 16 GiB). The Ubuntu AMI matches supported_architectures (arm64 or x86_64)."
   type        = string
-  default     = "c7i.4xlarge"
+  default     = "c7g.2xlarge"
 }
 
 variable "results_bucket" {

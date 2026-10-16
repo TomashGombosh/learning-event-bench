@@ -9,7 +9,12 @@ shutdown -h +${max_runtime_minutes} "learning-event-bench safety timeout"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y docker.io docker-compose-v2 git python3-venv tmux unzip curl
-curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+# Official AWS CLI v2 builds: x86_64 and aarch64 (Graviton uname -m).
+case "$(uname -m)" in
+  x86_64|aarch64) AWSCLI_ARCH="$(uname -m)" ;;
+  *) echo "no AWS CLI v2 build for $(uname -m)" >&2; exit 1 ;;
+esac
+curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-$${AWSCLI_ARCH}.zip" -o /tmp/awscliv2.zip
 unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
 systemctl enable --now docker
 usermod -aG docker ubuntu

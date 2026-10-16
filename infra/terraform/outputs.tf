@@ -2,6 +2,11 @@ output "instance_id" {
   value = aws_instance.bench.id
 }
 
+output "architecture" {
+  description = "CPU architecture selected for the instance (arm64 or x86_64)."
+  value       = local.instance_arch
+}
+
 output "public_ip" {
   value = aws_instance.bench.public_ip
 }

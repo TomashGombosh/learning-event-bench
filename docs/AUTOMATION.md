@@ -31,7 +31,7 @@ non-current versions expire after 30 days). Keep the bootstrap state file locall
    Replace `<ACCOUNT_ID>`, `<STATE_BUCKET>`, `<RESULTS_BUCKET>` in all three files.
 
 What the deploy role can do: read/write only `bench/*` in the state bucket; read the results bucket; create
-EC2 instances (only c7i.large, c7i.xlarge, c7i.2xlarge, c7i.4xlarge, c7g.2xlarge, m7i.2xlarge, m7i.4xlarge), security groups and key pairs; terminate/delete only
+EC2 instances (only c7i.large, c7i.xlarge, c7i.2xlarge, c7i.4xlarge, c7g.large, c7g.xlarge, c7g.2xlarge, c7g.4xlarge, m7i.2xlarge, m7i.4xlarge), security groups and key pairs; terminate/delete only
 resources tagged `Project=learning-event-bench`; create/delete IAM roles and instance profiles named `leb-instance-*`
 **only with the boundary attached**, and pass them to EC2 only. The instance role itself may only `PutObject`/`ListBucket`
 under `runs/<run_id>/` of the results bucket (no delete).
@@ -64,5 +64,7 @@ The repository must be public (the instance clones it anonymously at the exact c
 4. Deploy policy denies other instance types. Recommended extra: an AWS Budget with an e-mail alert (e.g. $30/month).
 
 ## Cost (on-demand Linux, EU Frankfurt, AWS price list 13.10.2026)
+c7g.2xlarge (default, Graviton3, 8 vCPU / 16 GiB) $0.3298/h → 12 h ≈ $4.0, 41 h worst case ≈ $13.5.
+Same size in us-east-1 (the `AWS_REGION` example) is $0.2900/h → 12 h ≈ $3.5, 41 h ≈ $11.9.
 c7i.4xlarge $0.8148/h → 12 h ≈ $9.8, 41 h worst case ≈ $33.4. m7i.2xlarge $0.483/h → 41 h ≈ $19.8.
 S3 storage for results (tens of MB) and state is negligible; GitHub Actions minutes for hourly checks are about 1 min each.

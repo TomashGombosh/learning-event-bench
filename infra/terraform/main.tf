@@ -1,10 +1,32 @@
+data "aws_ec2_instance_type" "bench" {
+  instance_type = var.instance_type
+}
+
+# Graviton (c7g) advertises arm64 only; c7i/m7i advertise x86_64 only.
+# Ubuntu image names use amd64 where EC2 says x86_64. DescribeImages is enough;
+# the deploy role has no ssm:GetParameter.
+locals {
+  supported_architectures = data.aws_ec2_instance_type.bench.supported_architectures
+  instance_arch = (
+    contains(local.supported_architectures, "arm64") && !contains(local.supported_architectures, "x86_64")
+    ? "arm64"
+    : "x86_64"
+  )
+  ubuntu_arch = local.instance_arch == "arm64" ? "arm64" : "amd64"
+}
+
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-${local.ubuntu_arch}-server-*"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = [local.instance_arch]
   }
 
   filter {
@@ -86,6 +108,13 @@ resource "aws_instance" "bench" {
 
   metadata_options {
     http_tokens = "required"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = contains(data.aws_ec2_instance_type.bench.supported_architectures, "arm64") || contains(data.aws_ec2_instance_type.bench.supported_architectures, "x86_64")
+      error_message = "Instance type ${var.instance_type} supports [${join(", ", sort(data.aws_ec2_instance_type.bench.supported_architectures))}], not arm64 or x86_64."
+    }
   }
 
   tags = {
