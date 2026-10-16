@@ -149,6 +149,13 @@ usermod -aG docker ubuntu
 sudo -Hu ubuntu git clone "${repo_url}" /home/ubuntu/learning-event-bench
 sudo -Hu ubuntu git -C /home/ubuntu/learning-event-bench checkout "${git_ref}"
 GIT_SHA=$(sudo -Hu ubuntu git -C /home/ubuntu/learning-event-bench rev-parse HEAD)
+# BuildKit (root, via leb-bench.service) reads git metadata from this repo.
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF '*'; then
+  git config --global --add safe.directory '*'
+fi
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF /home/ubuntu/learning-event-bench; then
+  git config --global --add safe.directory /home/ubuntu/learning-event-bench
+fi
 sudo -Hu ubuntu python3 -m venv /home/ubuntu/learning-event-bench/.venv
 sudo -Hu ubuntu /home/ubuntu/learning-event-bench/.venv/bin/pip install -q -r /home/ubuntu/learning-event-bench/analysis/requirements.txt
 
@@ -163,6 +170,7 @@ GIT_SHA=$GIT_SHA
 ENV
 install -m 755 /home/ubuntu/learning-event-bench/infra/instance/run-bench.sh /opt/leb/run-bench.sh
 install -m 755 /home/ubuntu/learning-event-bench/infra/instance/sync-results.sh /opt/leb/sync-results.sh
+install -m 755 /home/ubuntu/learning-event-bench/infra/instance/bench-failed.sh /opt/leb/bench-failed.sh
 
 # Root, not ubuntu: usermod -aG docker does not apply to this process, and aws is /usr/local/bin/aws.
 cat > /etc/systemd/system/leb-bench.service <<UNIT
@@ -170,6 +178,7 @@ cat > /etc/systemd/system/leb-bench.service <<UNIT
 Description=learning-event-bench experiment matrix
 After=docker.service network-online.target
 Requires=docker.service
+OnFailure=leb-bench-failed.service
 [Service]
 Type=simple
 User=root
@@ -179,6 +188,16 @@ ExecStart=/opt/leb/run-bench.sh
 Restart=no
 [Install]
 WantedBy=multi-user.target
+UNIT
+cat > /etc/systemd/system/leb-bench-failed.service <<UNIT
+[Unit]
+Description=Upload bench failure logs and power off
+[Service]
+Type=oneshot
+User=root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/leb/bench.env
+ExecStart=/opt/leb/bench-failed.sh
 UNIT
 cat > /etc/systemd/system/leb-sync.service <<UNIT
 [Unit]

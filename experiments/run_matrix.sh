@@ -17,12 +17,12 @@ tail -n +2 "$MATRIX" | while IFS=, read -r stage broker load rooms clients rate 
   echo "=== $run_id ($(date -Is))"
   export BROKER=$broker
   docker compose down -v --remove-orphans >/dev/null 2>&1 || true
-  docker compose up -d --wait redis kafka gateway1 gateway2 gateway3 >/dev/null
+  docker compose up -d --no-build --wait redis kafka gateway1 gateway2 gateway3 >/dev/null
   sleep 5
   if [ "$kill" = "1" ]; then (sleep $((KILL_AT_S)); docker compose kill gateway2 >/dev/null; echo "killed gateway2") & fi
   pids=()
   for ((s = 0; s < SHARDS; s++)); do
-    docker compose --profile load run --rm \
+    docker compose --profile load run --rm --no-build \
       -e RUN_ID="$run_id" -e BROKER_LABEL="$broker" -e ROOMS="$rooms" -e CLIENTS_PER_ROOM="$clients" \
       -e RATE_PER_CLIENT="$rate" -e DISCONNECTS_PER_MIN="$nu" -e MEAN_OFFLINE_S=2 \
       -e WARMUP_S="$WARMUP_S" -e DURATION_S="$DURATION_S" -e DRAIN_S="$DRAIN_S" \

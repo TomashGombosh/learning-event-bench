@@ -11,5 +11,8 @@ mkdir -p results
 aws s3 sync results "s3://${RESULTS_BUCKET}/runs/${RUN_ID}/results" --region "${AWS_REGION}" --only-show-errors \
   --exclude ".log-*"
 aws s3 cp /var/log/leb-setup.log "s3://${RESULTS_BUCKET}/runs/${RUN_ID}/logs/setup.log" --region "${AWS_REGION}" --only-show-errors || true
+if [ -f /var/log/leb/bench.log ]; then
+  aws s3 cp /var/log/leb/bench.log "s3://${RESULTS_BUCKET}/runs/${RUN_ID}/logs/bench.log" --region "${AWS_REGION}" --only-show-errors || true
+fi
 journalctl -u leb-bench --no-pager > /tmp/leb-bench.journal 2>&1 || true
 aws s3 cp /tmp/leb-bench.journal "s3://${RESULTS_BUCKET}/runs/${RUN_ID}/logs/bench.journal" --region "${AWS_REGION}" --only-show-errors || true

@@ -1,9 +1,12 @@
 # Single-host stand. CPU sets separate the system under test (cpus 0-9) from the load generator (10-15)
 # on a 16-vCPU instance (c7i.4xlarge / c7g.4xlarge). run-bench.sh overrides CPUSET_* and SHARDS from nproc
 # (c7g.2xlarge is 8 vCPU: gateways 0-2, redis 3, kafka 4, loadgen 5-7, SHARDS=2).
+# One service owns the build. Compose v2 builds every service that has `build:` in
+# parallel and tags them all broker-bench:latest, which BuildKit rejects
+# ("image already exists"). gateway2/3 and loadgen only consume the local tag.
 x-gateway: &gateway
-  build: .
   image: broker-bench:latest
+  pull_policy: never
   environment:
     BROKER: ${BROKER:-streams}
     REDIS_URL: redis://redis:6379
@@ -44,12 +47,16 @@ services:
       interval: 3s
       retries: 40
 
-  gateway1: { <<: *gateway, ports: ["3001:3000"] }
+  gateway1:
+    <<: *gateway
+    build: .
+    ports: ["3001:3000"]
   gateway2: { <<: *gateway, ports: ["3002:3000"] }
   gateway3: { <<: *gateway, ports: ["3003:3000"] }
 
   loadgen:
     image: broker-bench:latest
+    pull_policy: never
     profiles: ["load"]
     cap_add: [NET_ADMIN]
     cpuset: ${CPUSET_LOADGEN:-10-15}
