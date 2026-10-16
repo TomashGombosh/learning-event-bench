@@ -67,8 +67,19 @@ curl_retry() {
   return 1
 }
 
-# First install: CloudWatch agent, before the rest of the toolchain, so setup logs leave the box.
+# Base packages before any download or unpack. curl/unzip are not in the cloud image.
 apt_get update
+apt_get install -y ca-certificates curl unzip
+
+# AWS CLI next, so the ERR trap can upload setup-failed.log for every later failure.
+case "$(uname -m)" in
+  x86_64|aarch64) AWSCLI_ARCH="$(uname -m)" ;;
+  *) echo "no AWS CLI v2 build for $(uname -m)"; exit 1 ;;
+esac
+curl_retry -o /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-$AWSCLI_ARCH.zip"
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install
+
 case "$(uname -m)" in
   aarch64|arm64) CW_DEB_ARCH=arm64 ;;
   x86_64|amd64) CW_DEB_ARCH=amd64 ;;
@@ -123,16 +134,7 @@ EOF
   -a fetch-config -m ec2 -s \
   -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 
-# Official AWS CLI v2 builds: x86_64 and aarch64 (Graviton uname -m).
-case "$(uname -m)" in
-  x86_64|aarch64) AWSCLI_ARCH="$(uname -m)" ;;
-  *) echo "no AWS CLI v2 build for $(uname -m)"; exit 1 ;;
-esac
-curl_retry -o /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-$AWSCLI_ARCH.zip"
-unzip -q /tmp/awscliv2.zip -d /tmp
-/tmp/aws/install
-
-apt_get install -y docker.io docker-compose-v2 git python3-venv tmux unzip curl
+apt_get install -y docker.io docker-compose-v2 git python3-venv tmux sudo
 systemctl enable --now docker
 usermod -aG docker ubuntu
 
