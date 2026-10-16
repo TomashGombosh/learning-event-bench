@@ -1,5 +1,6 @@
 # Single-host stand. CPU sets separate the system under test (cpus 0-9) from the load generator (10-15)
-# on a 16-vCPU instance (c7i.4xlarge). Adjust CPUSET_* for other instance sizes.
+# on a 16-vCPU instance (c7i.4xlarge / c7g.4xlarge). run-bench.sh overrides CPUSET_* and SHARDS from nproc
+# (c7g.2xlarge is 8 vCPU: gateways 0-2, redis 3, kafka 4, loadgen 5-7, SHARDS=2).
 x-gateway: &gateway
   build: .
   image: broker-bench:latest

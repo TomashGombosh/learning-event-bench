@@ -5,7 +5,7 @@ on:
     inputs:
       instance_type:
         description: EC2 instance type
-        default: c7i.4xlarge
+        default: c7g.2xlarge
         type: string
       bench_reps:
         description: Repetitions per matrix cell (5 = 128 runs, about 12 h)
@@ -70,7 +70,7 @@ jobs:
 
       - name: Terraform apply
         env:
-          INSTANCE_TYPE: ${{ inputs.instance_type || 'c7i.4xlarge' }}
+          INSTANCE_TYPE: ${{ inputs.instance_type || 'c7g.2xlarge' }}
           BENCH_REPS: ${{ inputs.bench_reps || '5' }}
           BENCH_DURATION_S: ${{ inputs.bench_duration_s || '240' }}
         run: |
@@ -92,7 +92,7 @@ jobs:
           {
             echo "### Bench started"
             echo "- run id: \`${RUN_ID}\`"
-            echo "- instance: \`$(terraform output -raw instance_id)\`"
+            echo "- instance: \`$(terraform output -raw instance_id)\` ($(terraform output -raw architecture))"
             echo "- created at: $(terraform output -raw created_at)"
             echo "- results: $(terraform output -raw results_prefix)"
             echo "- automatic destroy by bench-down after 41 h (instance self-terminates at 41 h as well)"
