@@ -29,7 +29,14 @@ on_err() {
   else
     echo "aws cli not installed yet; setup-failed.log was not uploaded" >/dev/console || true
   fi
+  # A shutdown is already queued (+max_runtime_minutes). logind then rejects PowerOff
+  # ("Transaction ... is destructive") and `shutdown -h now` returns without powering off.
+  shutdown -c || true
   shutdown -h now "leb-setup failed at line $line" || true
+  sleep 15
+  systemctl poweroff --force || true
+  sleep 5
+  poweroff -f || true
   exit "$rc"
 }
 trap 'on_err "$LINENO" "$BASH_COMMAND"' ERR
@@ -138,11 +145,12 @@ apt_get install -y docker.io docker-compose-v2 git python3-venv tmux sudo
 systemctl enable --now docker
 usermod -aG docker ubuntu
 
-sudo -u ubuntu git clone "${repo_url}" /home/ubuntu/learning-event-bench
-sudo -u ubuntu git -C /home/ubuntu/learning-event-bench checkout "${git_ref}"
-GIT_SHA=$(git -C /home/ubuntu/learning-event-bench rev-parse HEAD)
-sudo -u ubuntu python3 -m venv /home/ubuntu/learning-event-bench/.venv
-sudo -u ubuntu /home/ubuntu/learning-event-bench/.venv/bin/pip install -q -r /home/ubuntu/learning-event-bench/analysis/requirements.txt
+# Repo is owned by ubuntu. Any later git as root dies with "dubious ownership".
+sudo -Hu ubuntu git clone "${repo_url}" /home/ubuntu/learning-event-bench
+sudo -Hu ubuntu git -C /home/ubuntu/learning-event-bench checkout "${git_ref}"
+GIT_SHA=$(sudo -Hu ubuntu git -C /home/ubuntu/learning-event-bench rev-parse HEAD)
+sudo -Hu ubuntu python3 -m venv /home/ubuntu/learning-event-bench/.venv
+sudo -Hu ubuntu /home/ubuntu/learning-event-bench/.venv/bin/pip install -q -r /home/ubuntu/learning-event-bench/analysis/requirements.txt
 
 mkdir -p /etc/leb /opt/leb
 cat > /etc/leb/bench.env <<ENV
@@ -156,6 +164,7 @@ ENV
 install -m 755 /home/ubuntu/learning-event-bench/infra/instance/run-bench.sh /opt/leb/run-bench.sh
 install -m 755 /home/ubuntu/learning-event-bench/infra/instance/sync-results.sh /opt/leb/sync-results.sh
 
+# Root, not ubuntu: usermod -aG docker does not apply to this process, and aws is /usr/local/bin/aws.
 cat > /etc/systemd/system/leb-bench.service <<UNIT
 [Unit]
 Description=learning-event-bench experiment matrix
@@ -163,6 +172,9 @@ After=docker.service network-online.target
 Requires=docker.service
 [Service]
 Type=simple
+User=root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/leb/bench.env
 ExecStart=/opt/leb/run-bench.sh
 Restart=no
 [Install]
@@ -173,6 +185,9 @@ cat > /etc/systemd/system/leb-sync.service <<UNIT
 Description=Upload learning-event-bench results to S3
 [Service]
 Type=oneshot
+User=root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/leb/bench.env
 ExecStart=/opt/leb/sync-results.sh
 UNIT
 cat > /etc/systemd/system/leb-sync.timer <<UNIT
