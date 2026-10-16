@@ -87,6 +87,7 @@ resource "aws_instance" "bench" {
   vpc_security_group_ids               = [aws_security_group.bench.id]
   iam_instance_profile                 = aws_iam_instance_profile.bench.name
   instance_initiated_shutdown_behavior = "terminate"
+  depends_on                           = [aws_cloudwatch_log_group.bench]
 
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
     repo_url            = var.repo_url

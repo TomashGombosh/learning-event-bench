@@ -2,6 +2,8 @@
 # Runs the experiment matrix on the EC2 instance (started by systemd unit leb-bench.service).
 # Environment (from /etc/leb/bench.env): RESULTS_BUCKET, RUN_ID, BENCH_REPS, BENCH_DURATION_S, AWS_REGION, GIT_SHA
 set -uo pipefail
+mkdir -p /var/log/leb
+exec > >(tee -a /var/log/leb/bench.log) 2>&1
 source /etc/leb/bench.env
 REPO=/home/ubuntu/learning-event-bench
 DEST="s3://${RESULTS_BUCKET}/runs/${RUN_ID}"

@@ -1,4 +1,7 @@
-# Instance role: may only write (put/list) under runs/ of the results bucket. No delete, no other services.
+# Instance role: write under runs/<run_id>/ of the results bucket, and publish to the
+# /leb/bench log group. No delete. Effective permissions are the intersection of this
+# policy and the permissions boundary (docs/aws/leb-instance-boundary.json); the boundary
+# is not managed here and must allow the same logs actions or PutLogEvents is denied.
 data "aws_iam_policy_document" "assume_ec2" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -30,6 +33,18 @@ data "aws_iam_policy_document" "results_write" {
       variable = "s3:prefix"
       values   = ["runs/${var.run_id}/*", "runs/${var.run_id}"]
     }
+  }
+  statement {
+    sid = "BenchLogs"
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "logs:DescribeLogStreams",
+    ]
+    resources = [
+      aws_cloudwatch_log_group.bench.arn,
+      "${aws_cloudwatch_log_group.bench.arn}:*",
+    ]
   }
 }
 

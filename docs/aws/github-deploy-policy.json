@@ -84,6 +84,22 @@
       }
     },
     {
+      "Sid": "BenchLogGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:PutRetentionPolicy",
+        "logs:DeleteLogGroup",
+        "logs:DescribeLogGroups",
+        "logs:TagResource",
+        "logs:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:logs:*:*:log-group:/leb/*",
+        "arn:aws:logs:*:*:log-group:/leb/*:*"
+      ]
+    },
+    {
       "Sid": "PassInstanceRoleToEc2Only",
       "Effect": "Allow",
       "Action": "iam:PassRole",

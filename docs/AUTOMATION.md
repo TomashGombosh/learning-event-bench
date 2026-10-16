@@ -25,16 +25,52 @@ non-current versions expire after 30 days). Keep the bootstrap state file locall
    (skip if it already exists in the account).
 2. Managed policy **`leb-instance-boundary`** from `docs/aws/leb-instance-boundary.json`. It is the permissions
    boundary that caps any instance role the workflow creates (prevents privilege escalation via PassRole).
+   If that policy already exists (some accounts named the same document `PutResultsToS3Policy`), edit it in place.
+   Terraform does not update it. Add this statement or `PutLogEvents` is denied even after the inline policy allows it:
+   ```json
+   {
+     "Sid": "BenchLogs",
+     "Effect": "Allow",
+     "Action": ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"],
+     "Resource": [
+       "arn:aws:logs:*:*:log-group:/leb/bench",
+       "arn:aws:logs:*:*:log-group:/leb/bench:*"
+     ]
+   }
+   ```
 3. Role, e.g. **`leb-github-actions`**:
    - trust policy: `docs/aws/github-oidc-trust-policy.json` (only `TomashGombosh/learning-event-bench`, branch `main`);
    - inline policy: `docs/aws/github-deploy-policy.json`.
    Replace `<ACCOUNT_ID>`, `<STATE_BUCKET>`, `<RESULTS_BUCKET>` in all three files.
+   If the inline policy already exists, add the `BenchLogGroup` statement from that file
+   (`logs:CreateLogGroup`, `logs:PutRetentionPolicy`, `logs:DeleteLogGroup`, `logs:DescribeLogGroups`,
+   `logs:TagResource`, `logs:ListTagsForResource` on `arn:aws:logs:*:*:log-group:/leb/*` and `...:/leb/*:*`).
+   Without it, bench-up cannot create log group `/leb/bench`.
 
 What the deploy role can do: read/write only `bench/*` in the state bucket; read the results bucket; create
 EC2 instances (only c7i.large, c7i.xlarge, c7i.2xlarge, c7i.4xlarge, c7g.large, c7g.xlarge, c7g.2xlarge, c7g.4xlarge, m7i.2xlarge, m7i.4xlarge), security groups and key pairs; terminate/delete only
-resources tagged `Project=learning-event-bench`; create/delete IAM roles and instance profiles named `leb-instance-*`
+resources tagged `Project=learning-event-bench`; create and delete log group `/leb/bench` (14 day retention);
+create/delete IAM roles and instance profiles named `leb-instance-*`
 **only with the boundary attached**, and pass them to EC2 only. The instance role itself may only `PutObject`/`ListBucket`
-under `runs/<run_id>/` of the results bucket (no delete).
+under `runs/<run_id>/` of the results bucket (no delete) and `CreateLogStream`/`PutLogEvents`/`DescribeLogStreams`
+on `/leb/bench`.
+
+### Debug reader (separate IAM user)
+`docs/aws/debug-reader-policy.json` is read-only, for someone inspecting a run without the deploy role.
+Replace `<RESULTS_BUCKET>`, then:
+
+```bash
+aws iam create-user --user-name leb-debug-reader
+aws iam put-user-policy --user-name leb-debug-reader \
+  --policy-name leb-debug-reader \
+  --policy-document file://docs/aws/debug-reader-policy.json
+```
+
+It allows `logs:GetLogEvents`, `logs:FilterLogEvents`, `logs:DescribeLogStreams`, `logs:DescribeLogGroups`
+on `/leb/bench`; `s3:ListBucket`/`s3:GetObject` on `runs/*` of the results bucket; `ec2:DescribeInstances`
+and `ec2:GetConsoleOutput`. Streams are `{run_id}/leb-setup.log`, `{run_id}/cloud-init-output.log`,
+`{run_id}/bench.log`, and `{run_id}/leb-bench.service`. bench-down deletes the log group with the stack;
+a setup failure also uploads `s3://<results>/runs/<run_id>/setup-failed.log`.
 
 ## 3. GitHub repository settings
 | Kind | Name | Value |
@@ -51,6 +87,8 @@ The repository must be public (the instance clones it anonymously at the exact c
 - **Actions → bench-up → Run workflow** (instance type, repetitions, measurement window).
   Duration ≈ runs × (duration + 90 s); 5 reps × 128 runs ≈ 12 h. Keep it below 40 h.
 - Progress: `aws s3 ls s3://<prefix>-results/runs/<run_id>/results/` or the `logs/` folder.
+  Live setup output is also in CloudWatch log group `/leb/bench`, stream `<run_id>/leb-setup.log`
+  (serial console via `aws ec2 get-console-output` if the agent never started).
 - **bench-down** runs hourly and destroys the stack when the instance is ≥ 41 h old, or finished/terminated early.
   Use *Run workflow* with `force = true` to stop immediately.
 - **bench-results → Run workflow** (empty run id = latest) produces an artifact with `_analysis/*.csv`.
