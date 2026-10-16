@@ -50,7 +50,19 @@ JSON
 
 write_meta running
 /opt/leb/sync-results.sh
-docker compose build 2>&1 | tail -n 5
+# Root (see leb-bench.service). docker.sock does not use the ubuntu docker group.
+if ! docker compose version >/dev/null 2>&1; then
+  echo "docker compose plugin is not on PATH"
+  write_meta failed || true
+  /opt/leb/sync-results.sh || true
+  exit 1
+fi
+if ! docker compose build; then
+  echo "docker compose build failed"
+  write_meta failed || true
+  /opt/leb/sync-results.sh || true
+  exit 1
+fi
 (cd experiments && python3 make_matrix.py "${BENCH_REPS}")
 DURATION_S="${BENCH_DURATION_S}" ./experiments/run_matrix.sh experiments/configs/matrix.csv 2>&1 | tee -a results/run.log
 STATUS=$([ "${PIPESTATUS[0]}" = "0" ] && echo completed || echo failed)
@@ -61,5 +73,9 @@ cp experiments/configs/matrix.csv results/matrix.csv
 /opt/leb/sync-results.sh
 echo "{\"status\":\"${STATUS}\",\"finished_at\":\"$(date -Is)\",\"git_sha\":\"${GIT_SHA}\"}" > /tmp/DONE.json
 aws s3 cp /tmp/DONE.json "${DEST}/DONE.json" --region "${AWS_REGION}"
-# Finished early: power off; instance_initiated_shutdown_behavior=terminate removes the instance.
-shutdown -h +5 "benchmark finished (${STATUS}); terminating in 5 minutes"
+# Replace the 41 h safety shutdown. If logind rejects it, power off anyway.
+shutdown -c || true
+if ! shutdown -h +5 "benchmark finished (${STATUS}); terminating in 5 minutes"; then
+  sleep 5
+  systemctl poweroff --force || poweroff -f || true
+fi
