@@ -1,21 +1,138 @@
 #!/bin/bash
 # Cloud-init: install tooling, clone the repo at the requested commit, start the benchmark under systemd.
+# Output goes to /var/log/leb-setup.log, syslog, and the serial console (GetConsoleOutput).
 set -euxo pipefail
-exec > /var/log/leb-setup.log 2>&1
+set -E
+
+RESULTS_BUCKET="${results_bucket}"
+RUN_ID="${run_id}"
+AWS_REGION="${region}"
+LEB_SETUP_FAILING=0
+
+mkdir -p /var/log/leb
+touch /var/log/leb-setup.log /var/log/leb/bench.log
+
+exec > >(stdbuf -oL tee -a /var/log/leb-setup.log | logger -t leb-setup -s 2>/dev/console) 2>&1
+
+on_err() {
+  local rc=$?
+  local line="$1"
+  local cmd="$2"
+  if [ "$LEB_SETUP_FAILING" = 1 ]; then
+    exit "$rc"
+  fi
+  LEB_SETUP_FAILING=1
+  echo "leb-setup failed at line $line (exit $rc): $cmd" | tee -a /var/log/leb-setup.log >/dev/console || true
+  sync /var/log/leb-setup.log || true
+  if command -v aws >/dev/null 2>&1; then
+    aws s3 cp /var/log/leb-setup.log "s3://$RESULTS_BUCKET/runs/$RUN_ID/setup-failed.log" --region "$AWS_REGION" || true
+  else
+    echo "aws cli not installed yet; setup-failed.log was not uploaded" >/dev/console || true
+  fi
+  shutdown -h now "leb-setup failed at line $line" || true
+  exit "$rc"
+}
+trap 'on_err "$LINENO" "$BASH_COMMAND"' ERR
 
 # Second line of defence: hard stop after max_runtime_minutes; shutdown behaviour = terminate.
 shutdown -h +${max_runtime_minutes} "learning-event-bench safety timeout"
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y docker.io docker-compose-v2 git python3-venv tmux unzip curl
+
+apt_get() {
+  local attempt=1
+  while [ "$attempt" -le 5 ]; do
+    if apt-get -o DPkg::Lock::Timeout=300 "$@"; then
+      return 0
+    fi
+    echo "apt-get failed (attempt $attempt), retrying"
+    sleep $((attempt * 5))
+    attempt=$((attempt + 1))
+  done
+  echo "apt-get failed after 5 attempts: $*"
+  return 1
+}
+
+curl_retry() {
+  local attempt=1
+  while [ "$attempt" -le 5 ]; do
+    if curl -fsSL "$@"; then
+      return 0
+    fi
+    echo "curl failed (attempt $attempt)"
+    sleep $((attempt * 2))
+    attempt=$((attempt + 1))
+  done
+  echo "curl failed after 5 attempts"
+  return 1
+}
+
+# First install: CloudWatch agent, before the rest of the toolchain, so setup logs leave the box.
+apt_get update
+case "$(uname -m)" in
+  aarch64|arm64) CW_DEB_ARCH=arm64 ;;
+  x86_64|amd64) CW_DEB_ARCH=amd64 ;;
+  *) echo "no amazon-cloudwatch-agent package for $(uname -m)"; exit 1 ;;
+esac
+curl_retry -o /tmp/amazon-cloudwatch-agent.deb \
+  "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/$CW_DEB_ARCH/latest/amazon-cloudwatch-agent.deb"
+apt_get install -y /tmp/amazon-cloudwatch-agent.deb
+
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
+{
+  "agent": {
+    "run_as_user": "root",
+    "region": "${region}"
+  },
+  "logs": {
+    "force_flush_interval": 5,
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/leb-setup.log",
+            "log_group_name": "/leb/bench",
+            "log_stream_name": "${run_id}/leb-setup.log"
+          },
+          {
+            "file_path": "/var/log/cloud-init-output.log",
+            "log_group_name": "/leb/bench",
+            "log_stream_name": "${run_id}/cloud-init-output.log"
+          },
+          {
+            "file_path": "/var/log/leb/bench.log",
+            "log_group_name": "/leb/bench",
+            "log_stream_name": "${run_id}/bench.log"
+          }
+        ]
+      },
+      "journald": {
+        "collect_list": [
+          {
+            "units": ["leb-bench.service"],
+            "log_group_name": "/leb/bench",
+            "log_stream_name": "${run_id}/leb-bench.service"
+          }
+        ]
+      }
+    }
+  }
+}
+EOF
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
 # Official AWS CLI v2 builds: x86_64 and aarch64 (Graviton uname -m).
 case "$(uname -m)" in
   x86_64|aarch64) AWSCLI_ARCH="$(uname -m)" ;;
-  *) echo "no AWS CLI v2 build for $(uname -m)" >&2; exit 1 ;;
+  *) echo "no AWS CLI v2 build for $(uname -m)"; exit 1 ;;
 esac
-curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-$${AWSCLI_ARCH}.zip" -o /tmp/awscliv2.zip
-unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
+curl_retry -o /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-$AWSCLI_ARCH.zip"
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install
+
+apt_get install -y docker.io docker-compose-v2 git python3-venv tmux unzip curl
 systemctl enable --now docker
 usermod -aG docker ubuntu
 

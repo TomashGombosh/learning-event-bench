@@ -1,0 +1,38 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadBenchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents",
+        "logs:DescribeLogStreams",
+        "logs:DescribeLogGroups"
+      ],
+      "Resource": [
+        "arn:aws:logs:*:*:log-group:/leb/bench",
+        "arn:aws:logs:*:*:log-group:/leb/bench:*"
+      ]
+    },
+    {
+      "Sid": "ListResultRuns",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::<RESULTS_BUCKET>",
+      "Condition": { "StringLike": { "s3:prefix": ["runs/*", "runs/"] } }
+    },
+    {
+      "Sid": "GetResultRuns",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::<RESULTS_BUCKET>/runs/*"
+    },
+    {
+      "Sid": "ReadInstances",
+      "Effect": "Allow",
+      "Action": ["ec2:DescribeInstances", "ec2:GetConsoleOutput"],
+      "Resource": "*"
+    }
+  ]
+}
