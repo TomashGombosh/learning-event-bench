@@ -39,10 +39,14 @@ jobs:
         working-directory: infra/terraform
     steps:
       - uses: actions/checkout@v4
+      - name: Debug OIDC role
+        run: |
+          echo "Role: ${{ vars.AWS_ROLE_ARN }}"
+          echo "Expected OIDC sub: repo:${{ github.repository }}:ref:${{ github.ref }}"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: bench-up-${{ github.run_id }}
 
