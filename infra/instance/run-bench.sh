@@ -86,7 +86,12 @@ if ! docker compose build gateway1; then
 fi
 (cd experiments && python3 make_matrix.py "${BENCH_REPS}")
 DURATION_S="${BENCH_DURATION_S}" ./experiments/run_matrix.sh experiments/configs/matrix.csv 2>&1 | tee -a results/run.log
-STATUS=$([ "${PIPESTATUS[0]}" = "0" ] && echo completed || echo failed)
+matrix_rc=${PIPESTATUS[0]}
+if [ "$matrix_rc" -ne 0 ] || ! ls results/*/shard-*/summary.json >/dev/null 2>&1; then
+  echo "benchmark produced no cell results (matrix exit ${matrix_rc})"
+  exit 1
+fi
+STATUS=completed
 
 .venv/bin/python analysis/analyze.py results experiments/configs/matrix.csv >> results/run.log 2>&1 || true
 write_meta "$STATUS"
