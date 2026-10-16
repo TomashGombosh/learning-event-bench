@@ -31,7 +31,7 @@ non-current versions expire after 30 days). Keep the bootstrap state file locall
    Replace `<ACCOUNT_ID>`, `<STATE_BUCKET>`, `<RESULTS_BUCKET>` in all three files.
 
 What the deploy role can do: read/write only `bench/*` in the state bucket; read the results bucket; create
-EC2 instances (only c7i.4xlarge, m7i.2xlarge, m7i.4xlarge), security groups and key pairs; terminate/delete only
+EC2 instances (only c7i.large, c7i.xlarge, c7i.2xlarge, c7i.4xlarge, c7g.2xlarge, m7i.2xlarge, m7i.4xlarge), security groups and key pairs; terminate/delete only
 resources tagged `Project=learning-event-bench`; create/delete IAM roles and instance profiles named `leb-instance-*`
 **only with the boundary attached**, and pass them to EC2 only. The instance role itself may only `PutObject`/`ListBucket`
 under `runs/<run_id>/` of the results bucket (no delete).
@@ -39,8 +39,8 @@ under `runs/<run_id>/` of the results bucket (no delete).
 ## 3. GitHub repository settings
 | Kind | Name | Value |
 |---|---|---|
-| Secret | `AWS_ROLE_ARN` | `arn:aws:iam::<ACCOUNT_ID>:role/leb-github-actions` |
-| Variable | `AWS_REGION` | `eu-central-1` |
+| Variable | `AWS_ROLE_ARN` | `arn:aws:iam::<ACCOUNT_ID>:role/leb-github-actions` |
+| Variable | `AWS_REGION` | `us-east-1` |
 | Variable | `TF_STATE_BUCKET` | `<prefix>-tfstate` |
 | Variable | `RESULTS_BUCKET` | `<prefix>-results` |
 | Variable | `PERMISSIONS_BOUNDARY_ARN` | `arn:aws:iam::<ACCOUNT_ID>:policy/leb-instance-boundary` |
