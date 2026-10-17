@@ -15,7 +15,11 @@ interface JoinRequest {
 }
 
 /** Thin controller: translates Socket.IO messages into use-case calls. No business logic here. */
-@WebSocketGateway({ cors: { origin: '*' } })
+@WebSocketGateway({
+  cors: { origin: '*' },
+  transports: ['websocket'],
+  perMessageDeflate: false,
+})
 export class CollabGateway implements OnGatewayInit {
   constructor(
     @Inject(PublishEventUseCase) private readonly publishEvent: PublishEventUseCase,

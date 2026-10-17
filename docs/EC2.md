@@ -17,13 +17,11 @@ sections 3–4 are only needed for manual runs (`sudo systemctl stop leb-bench` 
 After the run: copy results, then `terraform destroy` (section 5).
 
 ## 1. Option B: manual instance
-- Automated `bench-up` defaults to **c7g.2xlarge** (Graviton3, 8 vCPU, 16 GiB). Terraform picks the Ubuntu 24.04 AMI for the instance architecture (`arm64` or `x86_64`). On 8 vCPU, `run-bench.sh` sets `SHARDS=2` and `CPUSET_GATEWAYS=0-2 CPUSET_REDIS=3 CPUSET_KAFKA=4 CPUSET_LOADGEN=5-7`.
+- Automated `bench-up` defaults to **c7g.2xlarge** (Graviton3, 8 vCPU, 16 GiB) and **profile=smoke**. Terraform picks the Ubuntu 24.04 AMI for the instance architecture (`arm64` or `x86_64`). On 8 vCPU the cores are pinned: `gateway1=0 gateway2=1 gateway3=2 redis=3 kafka=4 loadgen=5-7` (`LOADGEN_CPUS=3`, `SHARDS=3`, one Node process per loadgen core). The generator and the brokers do not share a core. A second loadgen instance is not used: cross-host RTT would change the latency under test, and three loadgen cores are enough for L5000 once each shard has its own core.
 - 16 vCPU option: **c7i.4xlarge** or **c7g.4xlarge** (32 GiB), region eu-central-1 (Frankfurt), Ubuntu 24.04 LTS, 50 GiB gp3.
   On-demand Linux price on 13.10.2026 (AWS price list, EU Frankfurt): c7i.4xlarge **$0.8148/h**.
   A full matrix (~12 h) on that size therefore costs ≈ **$10** compute (+ a few cents of EBS for the days the volume exists).
-- Cheaper alternative: m7i.2xlarge (8 vCPU, 32 GiB, $0.483/h) — then set `SHARDS=2` and
-  `CPUSET_GATEWAYS=0-2 CPUSET_REDIS=3 CPUSET_KAFKA=4 CPUSET_LOADGEN=5-7`, and verify in the pilot that the load
-  generator stays below ~70 % CPU, otherwise it becomes the bottleneck.
+- Cheaper alternative: m7i.2xlarge (8 vCPU, 32 GiB, $0.483/h) uses the same 8-vCPU pin as c7g.2xlarge. Before a full profile, the instance runs a 30 s L5000 calibration and powers off if achieved send rate is under 95% of offered.
 - Security group: SSH (22) from your IP only. No other inbound ports are needed.
 
 ## 2. Prepare the host
