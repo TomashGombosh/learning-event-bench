@@ -48,6 +48,11 @@ export class SimulatedClient {
   /** Outbox: own operations not yet acknowledged by a gateway; re-sent after reconnect. */
   private readonly unacknowledged = new Map<number, CollabEvent>();
   private window: MeasurementWindow = { fromMs: Number.POSITIVE_INFINITY, toMs: Number.POSITIVE_INFINITY };
+  /** Pre-encoded one-character Yjs updates. Sending does not touch a Y.Doc. */
+  private pool: string[] = [];
+  private poolIndex = 0;
+  /** Own payloads, applied only when the digest is taken. */
+  private ownPayloads: string[] = [];
 
   constructor(
     readonly clientId: string,
@@ -66,6 +71,12 @@ export class SimulatedClient {
    * generation starts. Starting the schedule before `connect()` backfills every
    * missed slot with a timestamp from the past and turns connect time into latency.
    */
+  /** Encode `count` updates before the run so the send loop does not build Yjs state. */
+  prepare(count: number): void {
+    this.pool = this.replica.prebuild(count);
+    this.poolIndex = 0;
+  }
+
   arm(startMs: number, warmupS: number, durationS: number): void {
     this.window = {
       fromMs: startMs + warmupS * 1000,
@@ -77,6 +88,10 @@ export class SimulatedClient {
   async connect(): Promise<void> {
     const socket = io(this.gatewayUrls[this.gatewayIndex], {
       transports: ['websocket'],
+      upgrade: false,
+      // false disables compression. The published client type only lists the options object.
+      // @ts-expect-error engine.io types reject `false` even though the runtime honours it
+      perMessageDeflate: false,
       reconnection: false,
       forceNew: true,
     });
@@ -93,11 +108,25 @@ export class SimulatedClient {
 
   startGenerating(): void {
     this.generating = true;
-    this.loop();
   }
 
   stopGenerating(): void {
     this.generating = false;
+  }
+
+  /**
+   * Called from the shard timer (~1 ms). Sends every arrival that is already due,
+   * capped so one stalled client cannot empty the pool inside a single tick.
+   */
+  sendDue(nowMs: number): void {
+    if (!this.generating) return;
+    let burst = 0;
+    while (burst < 4 && this.schedule.peek() <= nowMs) {
+      const scheduledAtMs = this.schedule.advance();
+      if (this.online) this.send(scheduledAtMs);
+      else this.counters.skippedWhileOffline++;
+      burst++;
+    }
   }
 
   /** Simulates a client-side network drop (fault injector). */
@@ -130,6 +159,8 @@ export class SimulatedClient {
   }
 
   digest(): ReplicaDigest {
+    for (let i = 0; i < this.ownPayloads.length; i++) this.replica.queueRemote(this.ownPayloads[i]);
+    this.ownPayloads = [];
     return { roomId: this.roomId, clientId: this.clientId, digest: this.replica.digest() };
   }
 
@@ -138,27 +169,17 @@ export class SimulatedClient {
     this.socket?.disconnect();
   }
 
-  private loop(): void {
-    if (!this.generating) return;
-    const delay = Math.max(0, this.schedule.peek() - preciseNowMs());
-    setTimeout(() => {
-      if (!this.generating) return;
-      const scheduledAtMs = this.schedule.advance();
-      if (this.online) this.send(scheduledAtMs);
-      else this.counters.skippedWhileOffline++;
-      this.loop();
-    }, delay);
-  }
-
   private send(scheduledAtMs: number): void {
     const sentAtMs = preciseNowMs();
     this.recorder.recordScheduleLag(sentAtMs - scheduledAtMs);
+    const payload = this.poolIndex < this.pool.length ? this.pool[this.poolIndex++] : this.replica.editRandomly();
+    this.ownPayloads.push(payload);
     const event: CollabEvent = {
       roomId: this.roomId,
       clientId: this.clientId,
       seq: ++this.seq,
       category: EventCategory.CollaborativeEditing,
-      payload: this.replica.editRandomly(),
+      payload,
       scheduledAtMs,
       sentAtMs,
     };
@@ -170,8 +191,11 @@ export class SimulatedClient {
   private emitWithOutbox(event: CollabEvent): void {
     const socket = this.socket;
     if (!socket?.connected) return;
-    socket.timeout(ACK_TIMEOUT_MS).emit('op', event, (error: Error | null) => {
-      if (!error) this.unacknowledged.delete(event.seq);
+    // No per-op timeout. socket.timeout() arms a timer per message; at L5000 that is
+    // tens of thousands of timers on one thread and the generator never catches up.
+    // A missing ack stays in the outbox and is resent after reconnect.
+    socket.emit('op', event, () => {
+      this.unacknowledged.delete(event.seq);
     });
   }
 
@@ -180,12 +204,18 @@ export class SimulatedClient {
     else this.lastSeenId = stored.id;
     const { event } = stored;
     if (event.clientId === this.clientId) return;
-    this.replica.applyRemote(event.payload);
+    this.replica.queueRemote(event.payload);
     this.counters.received++;
-    if (event.scheduledAtMs >= this.window.fromMs && event.scheduledAtMs < this.window.toMs) {
-      this.recorder.record(latencyOf(
-        event.roomId, event.scheduledAtMs, preciseNowMs(), event.gatewayInAtMs, event.sentAtMs,
+    if (event.scheduledAtMs < this.window.fromMs || event.scheduledAtMs >= this.window.toMs) return;
+    const now = preciseNowMs();
+    const sentAt = event.sentAtMs ?? event.scheduledAtMs;
+    const serviceUs = (now - sentAt) * 1000;
+    if (this.recorder.shouldCapture()) {
+      this.recorder.recordServiceUs(serviceUs, latencyOf(
+        event.roomId, event.scheduledAtMs, now, event.gatewayInAtMs, event.sentAtMs,
       ));
+    } else {
+      this.recorder.recordServiceUs(serviceUs);
     }
   }
 
@@ -196,7 +226,7 @@ export class SimulatedClient {
       return false;
     }
     for (const stored of result.missed) {
-      if (stored.event.clientId !== this.clientId) this.replica.applyRemote(stored.event.payload);
+      if (stored.event.clientId !== this.clientId) this.replica.queueRemote(stored.event.payload);
       this.lastSeenId = stored.id;
       this.counters.catchUpEvents++;
     }

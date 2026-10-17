@@ -84,8 +84,7 @@ a setup failure also uploads `s3://<results>/runs/<run_id>/setup-failed.log`.
 The repository must be public (the instance clones it anonymously at the exact commit of the workflow run).
 
 ## 4. Run
-- **Actions → bench-up → Run workflow** (instance type, repetitions, measurement window).
-  `bench_reps=1` is a 6-cell smoke plan (not 1 rep of the 128-run factorial). Duration ≈ runs × (duration + 90 s); 5 reps × 128 runs ≈ 12 h. Keep it below 40 h.
+- **Actions → bench-up → Run workflow**. `profile` defaults to **smoke** (6 cells, 60 s). Choose `full` for the factorial (`bench_reps=5` is 128 cells, ~12 h). A default dispatch does not start that run. Duration ≈ runs × (duration + 90 s). Keep a full run below 40 h.
   A stuck cell is killed after `(warmup + duration + drain) × 3 + 60 s`. A watchdog of `cells × (compose-up budget + that timeout)` uploads logs to S3 and powers the instance off.
 - Progress: `aws s3 ls s3://<prefix>-results/runs/<run_id>/results/` or the `logs/` folder.
   Live setup output is also in CloudWatch log group `/leb/bench`, stream `<run_id>/leb-setup.log`

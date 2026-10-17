@@ -7,12 +7,19 @@ on:
         description: EC2 instance type
         default: c7g.2xlarge
         type: string
+      profile:
+        description: smoke = 6 cells, 60s. full = 128-cell matrix, about 12h. Default never starts the long run.
+        type: choice
+        options:
+          - smoke
+          - full
+        default: smoke
       bench_reps:
-        description: Repetitions per matrix cell (1 = smoke, 6 cells; 5 = 128 runs, about 12 h)
+        description: Repetitions per cell when profile=full (5 = 128 runs). Ignored for smoke.
         default: "5"
         type: string
       bench_duration_s:
-        description: Measurement window per run (seconds)
+        description: Measurement window in seconds when profile=full. Smoke is 60s.
         default: "240"
         type: string
   # Optional: weekly start (Saturday 20:00 UTC). Uncomment to enable.
@@ -71,11 +78,21 @@ jobs:
       - name: Terraform apply
         env:
           INSTANCE_TYPE: ${{ inputs.instance_type || 'c7g.2xlarge' }}
+          PROFILE: ${{ inputs.profile || 'smoke' }}
           BENCH_REPS: ${{ inputs.bench_reps || '5' }}
           BENCH_DURATION_S: ${{ inputs.bench_duration_s || '240' }}
         run: |
           RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA::7}"
           echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          if [ "$PROFILE" = "full" ]; then
+            REPS="$BENCH_REPS"
+            DURATION="$BENCH_DURATION_S"
+          else
+            PROFILE=smoke
+            REPS=1
+            DURATION=60
+          fi
+          echo "profile=$PROFILE reps=$REPS duration_s=$DURATION"
           terraform apply -input=false -auto-approve \
             -var "region=${AWS_REGION}" \
             -var "instance_type=${INSTANCE_TYPE}" \
@@ -83,14 +100,16 @@ jobs:
             -var "permissions_boundary_arn=${{ vars.PERMISSIONS_BOUNDARY_ARN }}" \
             -var "run_id=${RUN_ID}" \
             -var "git_ref=${GITHUB_SHA}" \
-            -var "bench_reps=${BENCH_REPS}" \
-            -var "bench_duration_s=${BENCH_DURATION_S}" \
+            -var "bench_profile=${PROFILE}" \
+            -var "bench_reps=${REPS}" \
+            -var "bench_duration_s=${DURATION}" \
             -var "max_runtime_minutes=2460"
 
       - name: Summary
         run: |
           {
             echo "### Bench started"
+            echo "- profile: \`${{ inputs.profile || 'smoke' }}\`"
             echo "- run id: \`${RUN_ID}\`"
             echo "- instance: \`$(terraform output -raw instance_id)\` ($(terraform output -raw architecture))"
             echo "- created at: $(terraform output -raw created_at)"

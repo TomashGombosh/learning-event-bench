@@ -26,6 +26,19 @@ export class LatencyRecorder {
 
   constructor(private readonly random: Random, private readonly reservoirSize: number) {}
 
+  /** True for 1/32 of deliveries. The hot path records only the histogram. */
+  shouldCapture(): boolean {
+    return (this.seen & 31) === 0 && this.reservoir.length < this.reservoirSize;
+  }
+
+  /** Hot path: HDR histogram only. `sample` is set for the reservoir subsample. */
+  recordServiceUs(serviceUs: number, sample?: LatencySample): void {
+    if (serviceUs < 0) this.clockSkew++;
+    else this.service.recordValue(Math.max(1, Math.round(serviceUs)));
+    this.seen++;
+    if (sample !== undefined && this.reservoir.length < this.reservoirSize) this.reservoir.push(sample);
+  }
+
   /** Service latency of one delivered remote event (send -> receive). */
   record(sample: LatencySample): void {
     const serviceMs = sample.serviceMs ?? sample.totalMs;

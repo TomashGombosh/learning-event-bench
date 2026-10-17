@@ -8,6 +8,7 @@ import { assessLoad } from './load-report';
 import { LatencyRecorder } from './latency-recorder';
 import { PoissonSchedule } from './poisson-schedule';
 import { seededRandom } from './random';
+import { ShardScheduler } from './shard-scheduler';
 import { ClientCounters, SimulatedClient } from './simulated-client';
 import { YjsReplica } from './yjs-replica';
 
@@ -39,6 +40,10 @@ async function main(): Promise<void> {
     console.log('no rooms assigned to this shard; nothing to do');
     process.exit(0);
   }
+  const poolCount = Math.ceil(config.RATE_PER_CLIENT * (config.WARMUP_S + config.DURATION_S) * 1.5) + 32;
+  const prebuildStarted = preciseNowMs();
+  clients.forEach((c) => c.prepare(poolCount));
+  console.log(`prebuilt ${clients.length * poolCount} yjs updates in ${Math.round(preciseNowMs() - prebuildStarted)}ms`);
   await Promise.all(clients.map((c) => c.open()));
   const online = clients.filter((c) => c.isOnline).length;
   console.log(`connected ${online}/${clients.length} clients to ${gateways.length} gateway(s)`);
@@ -55,7 +60,10 @@ async function main(): Promise<void> {
   });
   clients.forEach((c) => c.startGenerating());
   injector.start(clients);
+  const scheduler = new ShardScheduler(clients);
+  scheduler.start();
   await sleep(config.WARMUP_S + config.DURATION_S);
+  scheduler.stop();
   clients.forEach((c) => c.stopGenerating());
   await injector.stopAndRestore(clients);
   await sleep(config.DRAIN_S);

@@ -1,6 +1,10 @@
-# Single-host stand. CPU sets separate the system under test (cpus 0-9) from the load generator (10-15)
-# on a 16-vCPU instance (c7i.4xlarge / c7g.4xlarge). run-bench.sh overrides CPUSET_* and SHARDS from nproc
-# (c7g.2xlarge is 8 vCPU: gateways 0-2, redis 3, kafka 4, loadgen 5-7, SHARDS=2).
+# Single-host stand. CPUs are pinned so the generator cannot starve the brokers and the reverse.
+# Defaults match 16 vCPU (c7i.4xlarge / c7g.4xlarge): one gateway pair of cores each, redis, kafka,
+# loadgen on 10-15 (6 cores, SHARDS=6). The cpuset is the limit: a container cannot
+# run on any other core. run-bench.sh overrides the sets from nproc.
+# c7g.2xlarge (8 vCPU, the default instance): gateway1=0 gateway2=1 gateway3=2 redis=3 kafka=4
+# loadgen=5-7 (3 cores, 3 shards). A second loadgen host is not used: it would add a VPC hop to T,
+# and 3 cores sustain L5000 once the generator is not timer-bound.
 # One service owns the build. Compose v2 builds every service that has `build:` in
 # parallel and tags them all broker-bench:latest, which BuildKit rejects
 # ("image already exists"). gateway2/3 and loadgen only consume the local tag.
@@ -13,7 +17,7 @@ x-gateway: &gateway
     KAFKA_BROKERS: kafka:9092
     KAFKA_PARTITIONS: ${KAFKA_PARTITIONS:-12}
     STREAM_MAXLEN: ${STREAM_MAXLEN:-10000}
-  cpuset: ${CPUSET_GATEWAYS:-0-5}
+  cpuset: ${CPUSET_GATEWAYS:-0-1}
   depends_on:
     redis: { condition: service_healthy }
     kafka: { condition: service_healthy }
@@ -50,9 +54,16 @@ services:
   gateway1:
     <<: *gateway
     build: .
+    cpuset: ${CPUSET_GATEWAY1:-0-1}
     ports: ["3001:3000"]
-  gateway2: { <<: *gateway, ports: ["3002:3000"] }
-  gateway3: { <<: *gateway, ports: ["3003:3000"] }
+  gateway2:
+    <<: *gateway
+    cpuset: ${CPUSET_GATEWAY2:-2-3}
+    ports: ["3002:3000"]
+  gateway3:
+    <<: *gateway
+    cpuset: ${CPUSET_GATEWAY3:-4-5}
+    ports: ["3003:3000"]
 
   loadgen:
     image: broker-bench:latest

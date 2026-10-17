@@ -1,6 +1,7 @@
 import { assessLoad } from '../../apps/load-generator/load-report';
 import { PoissonSchedule } from '../../apps/load-generator/poisson-schedule';
 import { exponentialSeconds, seededRandom } from '../../apps/load-generator/random';
+import { ShardScheduler } from '../../apps/load-generator/shard-scheduler';
 import { YjsReplica } from '../../apps/load-generator/yjs-replica';
 
 describe('load generator building blocks', () => {
@@ -60,6 +61,33 @@ describe('load generator building blocks', () => {
       scheduleLagP50Ms: 8, serviceP50Ms: 20, disconnectsPerMin: 1,
     });
     expect(faults.saturated).toBe(false);
+  });
+
+  it('queued prebuilt updates converge and a missing update diverges', () => {
+    const pool = new YjsReplica(seededRandom(8)).prebuild(25);
+    const a = new YjsReplica(seededRandom(9));
+    const b = new YjsReplica(seededRandom(10));
+    const c = new YjsReplica(seededRandom(11));
+    pool.forEach((payload) => {
+      a.queueRemote(payload);
+      b.queueRemote(payload);
+    });
+    pool.filter((_, index) => index !== 4).forEach((payload) => c.queueRemote(payload));
+    expect(pool.every((payload) => payload.length > 0)).toBe(true);
+    expect(b.digest()).toBe(a.digest());
+    expect(c.digest()).not.toBe(a.digest());
+  });
+
+  it('one scheduler tick drives every client', async () => {
+    let calls = 0;
+    const scheduler = new ShardScheduler([
+      { sendDue() { calls += 1; } },
+      { sendDue() { calls += 1; } },
+    ]);
+    scheduler.start();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    scheduler.stop();
+    expect(calls).toBeGreaterThanOrEqual(4);
   });
 
   it('Yjs updates are idempotent and order-independent (safe for catch-up duplicates)', () => {

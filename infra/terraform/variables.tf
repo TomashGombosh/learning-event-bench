@@ -32,14 +32,25 @@ variable "git_ref" {
   default     = "main"
 }
 
+variable "bench_profile" {
+  description = "smoke = 6 cells x 60s (default). full = factorial using bench_reps and bench_duration_s (~12 h at the defaults)."
+  type        = string
+  default     = "smoke"
+
+  validation {
+    condition     = contains(["smoke", "full"], var.bench_profile)
+    error_message = "bench_profile must be smoke or full."
+  }
+}
+
 variable "bench_reps" {
-  description = "Repetitions per matrix cell (1 = 6-cell smoke; 5 -> 128 runs, ~12 h)."
+  description = "Repetitions per matrix cell when bench_profile=full (5 -> 128 runs, ~12 h). Ignored for smoke."
   type        = number
   default     = 5
 }
 
 variable "bench_duration_s" {
-  description = "Measurement window per run, seconds."
+  description = "Measurement window per run, seconds, when bench_profile=full. Smoke forces 60s."
   type        = number
   default     = 240
 }
