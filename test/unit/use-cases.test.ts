@@ -1,5 +1,5 @@
 import { InMemoryEventBus } from '@adapters/in-memory/in-memory-event-bus';
-import { CatchUpAfterReconnectUseCase } from '@application/use-cases/catch-up.use-case';
+import { CATCH_UP_PAGE_SIZE, CatchUpAfterReconnectUseCase } from '@application/use-cases/catch-up.use-case';
 import { PublishEventUseCase } from '@application/use-cases/publish-event.use-case';
 import { RelayRoomEventsUseCase } from '@application/use-cases/relay-room-events.use-case';
 import { StoredEvent } from '@domain/collab-event';
@@ -37,5 +37,21 @@ describe('use cases', () => {
     for (let i = 1; i <= 3; i++) await bus.publish(event(i));
     const result = await new CatchUpAfterReconnectUseCase(bus).execute('room', '1');
     expect(result.supported && result.missed.map((s) => s.event.seq)).toEqual([2, 3]);
+    expect(result.supported && result.truncated).toBe(false);
+  });
+
+  it('CatchUp pages a long log instead of returning one unbounded ack', async () => {
+    const bus = new InMemoryEventBus();
+    const total = CATCH_UP_PAGE_SIZE + 3;
+    for (let i = 1; i <= total; i++) await bus.publish(event(i));
+    const first = await new CatchUpAfterReconnectUseCase(bus).execute('room', null);
+    expect(first.supported && first.truncated).toBe(true);
+    expect(first.supported && first.missed).toHaveLength(CATCH_UP_PAGE_SIZE);
+    const lastId = first.supported ? first.missed[first.missed.length - 1].id : '';
+    const second = await new CatchUpAfterReconnectUseCase(bus).execute('room', lastId);
+    expect(second.supported && second.truncated).toBe(false);
+    expect(second.supported && second.missed.map((s) => s.event.seq)).toEqual([
+      CATCH_UP_PAGE_SIZE + 1, CATCH_UP_PAGE_SIZE + 2, CATCH_UP_PAGE_SIZE + 3,
+    ]);
   });
 });

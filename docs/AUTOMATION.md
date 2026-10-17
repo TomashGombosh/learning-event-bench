@@ -85,7 +85,8 @@ The repository must be public (the instance clones it anonymously at the exact c
 
 ## 4. Run
 - **Actions → bench-up → Run workflow** (instance type, repetitions, measurement window).
-  Duration ≈ runs × (duration + 90 s); 5 reps × 128 runs ≈ 12 h. Keep it below 40 h.
+  `bench_reps=1` is a 6-cell smoke plan (not 1 rep of the 128-run factorial). Duration ≈ runs × (duration + 90 s); 5 reps × 128 runs ≈ 12 h. Keep it below 40 h.
+  A stuck cell is killed after `(warmup + duration + drain) × 3 + 60 s`. A watchdog of `cells × (compose-up budget + that timeout)` uploads logs to S3 and powers the instance off.
 - Progress: `aws s3 ls s3://<prefix>-results/runs/<run_id>/results/` or the `logs/` folder.
   Live setup output is also in CloudWatch log group `/leb/bench`, stream `<run_id>/leb-setup.log`
   (serial console via `aws ec2 get-console-output` if the agent never started).
@@ -96,10 +97,11 @@ The repository must be public (the instance clones it anonymously at the exact c
 
 ## Layers of protection against runaway cost
 1. The instance self-terminates 5 minutes after the matrix finishes.
-2. `shutdown -h +2460` in user_data and `instance_initiated_shutdown_behavior = terminate` (41 h hard stop,
+2. Per-cell `timeout` on the load generator, then a matrix-sized watchdog that uploads logs and powers off.
+3. `shutdown -h +2460` in user_data and `instance_initiated_shutdown_behavior = terminate` (41 h hard stop,
    works even if GitHub is unavailable).
-3. bench-down hourly: destroys at ≥ 41 h, or when the instance is no longer running.
-4. Deploy policy denies other instance types. Recommended extra: an AWS Budget with an e-mail alert (e.g. $30/month).
+4. bench-down hourly: destroys at ≥ 41 h, or when the instance is no longer running.
+5. Deploy policy denies other instance types. Recommended extra: an AWS Budget with an e-mail alert (e.g. $30/month).
 
 ## Cost (on-demand Linux, EU Frankfurt, AWS price list 13.10.2026)
 c7g.2xlarge (default, Graviton3, 8 vCPU / 16 GiB) $0.3298/h → 12 h ≈ $4.0, 41 h worst case ≈ $13.5.

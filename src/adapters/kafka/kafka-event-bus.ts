@@ -73,7 +73,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
   }
 
   /** Replays a room partition with a short-lived consumer (slow: includes a group join). */
-  async readAfter(roomId: string, lastId: EventId | null): Promise<StoredEvent[]> {
+  async readAfter(roomId: string, lastId: EventId | null, limit?: number): Promise<StoredEvent[]> {
     const partition = partitionOf(roomId, this.partitions);
     const startOffset = lastId === null ? null : parseKafkaEventId(lastId).offset + 1n;
     const offsets = await this.admin.fetchTopicOffsets(this.options.topic);
@@ -81,14 +81,16 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     const low = BigInt(offsets.find((o) => o.partition === partition)!.low);
     const from = startOffset ?? low;
     if (from >= high) return [];
-    return this.consumeRange(roomId, partition, from, high);
+    return this.consumeRange(roomId, partition, from, high, limit);
   }
 
   async close(): Promise<void> {
     await Promise.allSettled([this.consumer.disconnect(), this.producer.disconnect(), this.admin.disconnect()]);
   }
 
-  private async consumeRange(roomId: string, partition: number, from: bigint, high: bigint): Promise<StoredEvent[]> {
+  private async consumeRange(
+    roomId: string, partition: number, from: bigint, high: bigint, limit?: number,
+  ): Promise<StoredEvent[]> {
     const replayer = this.kafka.consumer({ groupId: `replay-${randomUUID()}`, maxWaitTimeInMs: 5 });
     const collected: StoredEvent[] = [];
     await replayer.connect();
@@ -98,7 +100,10 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
         eachMessage: async ({ partition: p, message }) => {
           if (p !== partition) return;
           const event = decodeEvent(message.value!.toString());
-          if (event.roomId === roomId) collected.push({ id: kafkaEventId(p, message.offset), event });
+          if (event.roomId === roomId) {
+            collected.push({ id: kafkaEventId(p, message.offset), event });
+            if (limit !== undefined && collected.length >= limit) resolve();
+          }
           if (BigInt(message.offset) >= high - 1n) resolve();
         },
       });

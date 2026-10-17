@@ -14,6 +14,8 @@ export interface CollabEvent {
   readonly payload: string;
   /** Time (ms, sender clock) at which the event was *scheduled* (avoids coordinated omission). */
   readonly scheduledAtMs: number;
+  /** Time (ms, sender clock) at which the event was actually handed to the socket. */
+  readonly sentAtMs?: number;
   /** Time (ms, gateway clock) at which the gateway accepted the event. */
   readonly gatewayInAtMs?: number;
 }
