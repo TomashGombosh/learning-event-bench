@@ -75,6 +75,15 @@ jobs:
             exit 1
           fi
 
+      - name: Import the persistent log group when it already exists
+        run: |
+          if aws logs describe-log-groups --log-group-name-prefix /leb/bench \
+              --query "logGroups[?logGroupName=='/leb/bench'] | length(@)" --output text | grep -qx 1; then
+            if ! terraform state list 2>/dev/null | grep -qx 'aws_cloudwatch_log_group.bench'; then
+              terraform import -input=false aws_cloudwatch_log_group.bench /leb/bench
+            fi
+          fi
+
       - name: Terraform apply
         env:
           INSTANCE_TYPE: ${{ inputs.instance_type || 'c7g.2xlarge' }}

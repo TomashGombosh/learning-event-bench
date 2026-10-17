@@ -27,6 +27,32 @@ if [ -n "$NETEM" ] && command -v modprobe >/dev/null 2>&1; then
 fi
 echo "per-cell loadgen timeout ${CELL_TIMEOUT_S}s (warmup=${WARMUP_S} duration=${DURATION_S} drain=${DRAIN_S} kill_at=${KILL_AT_S} compose_up=${COMPOSE_UP_TIMEOUT_S}s)"
 
+# One grep-able line per cell on stdout. run-bench tees that into bench.log, which CloudWatch
+# ships, so the cell can be read without downloading the S3 results. p50 and p99 are the
+# worst shard (pooled percentiles stay in the analysis artifact).
+emit_cell_summary() {
+  python3 - "$1" "$2" <<'PY' || echo "CELL $1 broker=$2 FAILED"
+import json, sys
+from pathlib import Path
+run_id, broker = sys.argv[1], sys.argv[2]
+shards = sorted(Path("results", run_id).glob("shard-*/summary.json"))
+if not shards:
+    print(f"CELL {run_id} broker={broker} FAILED")
+    raise SystemExit(0)
+summaries = [json.loads(path.read_text()) for path in shards]
+offered = sum(float(s["load"]["offeredPerSec"]) for s in summaries)
+achieved = sum(float(s["load"]["achievedSendPerSec"]) for s in summaries)
+p50 = max(float(s["latency"]["p50Ms"]) for s in summaries)
+p99 = max(float(s["latency"]["p99Ms"]) for s in summaries)
+rooms_diverged = sum(int(s.get("divergedRooms", 0)) for s in summaries)
+clients_lost = sum(int(s.get("clientsLost", 0)) for s in summaries)
+print(
+    f"CELL {run_id} broker={broker} offered/achieved={offered:.1f}/{achieved:.1f} "
+    f"p50={p50:.1f} p99={p99:.1f} rooms_diverged={rooms_diverged} clients_lost={clients_lost}"
+)
+PY
+}
+
 # docker compose run attaches stdin. A `tail | while read` pipe is that stdin, so the
 # first loadgen consumes every remaining matrix row and the stack is torn down after one cell.
 failed_cells=()
@@ -90,6 +116,7 @@ while IFS=, read -r stage broker load rooms clients rate nu kill rep run_id; do
     wait "$kill_pid" 2>/dev/null || true
   fi
   docker compose logs --no-color gateway1 gateway2 gateway3 > "results/$run_id/gateways.log" 2>&1 || true
+  emit_cell_summary "$run_id" "$broker"
   if [ "$shard_failed" -ne 0 ] || ! ls "results/$run_id"/shard-*/summary.json >/dev/null 2>&1; then
     echo "cell $run_id produced no results (shard_failed=$shard_failed)" | tee -a "results/$run_id/cell-failed.txt" >&2
     failed_cells+=("$run_id")

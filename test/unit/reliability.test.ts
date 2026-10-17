@@ -10,10 +10,33 @@ describe('reliability', () => {
       { roomId: 'r2', clientId: 'b', digest: 'y' },
     ]);
     expect(outcomes).toEqual([
-      { roomId: 'r1', replicas: 2, diverged: false },
-      { roomId: 'r2', replicas: 2, diverged: true },
+      { roomId: 'r1', replicas: 2, diverged: false, lostClients: 0, notConvergedClients: 0 },
+      { roomId: 'r2', replicas: 2, diverged: true, lostClients: 0, notConvergedClients: 2 },
     ]);
     expect(reliability(outcomes)).toBe(0.5);
+  });
+
+  it('counts a lost client as not converged even when the other digests match', () => {
+    const outcomes = evaluateRooms([
+      { roomId: 'r1', clientId: 'a', digest: 'x' },
+      { roomId: 'r1', clientId: 'b', digest: 'x' },
+      { roomId: 'r1', clientId: 'c', digest: 'x' },
+    ], new Set(['c']));
+    expect(outcomes).toEqual([
+      { roomId: 'r1', replicas: 3, diverged: true, lostClients: 1, notConvergedClients: 1 },
+    ]);
+    expect(reliability(outcomes)).toBe(0);
+  });
+
+  it('counts only the minority digest as not converged when a majority exists', () => {
+    const outcomes = evaluateRooms([
+      { roomId: 'r1', clientId: 'a', digest: 'x' },
+      { roomId: 'r1', clientId: 'b', digest: 'x' },
+      { roomId: 'r1', clientId: 'c', digest: 'y' },
+    ]);
+    expect(outcomes[0].diverged).toBe(true);
+    expect(outcomes[0].notConvergedClients).toBe(1);
+    expect(outcomes[0].lostClients).toBe(0);
   });
 
   it('refuses to compute R without rooms', () => {

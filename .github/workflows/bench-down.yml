@@ -74,6 +74,9 @@ jobs:
       - name: Terraform destroy
         if: steps.decide.outputs.destroy == 'true'
         run: |
+          # /leb/bench has prevent_destroy. Remove it from state so destroy does not
+          # try to delete the group (and its streams). The next bench-up imports it.
+          terraform state rm aws_cloudwatch_log_group.bench || true
           terraform destroy -input=false -auto-approve \
             -var "region=${AWS_REGION}" \
             -var "results_bucket=${{ vars.RESULTS_BUCKET }}" \
