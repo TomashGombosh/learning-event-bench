@@ -69,7 +69,10 @@ async function main(): Promise<void> {
   await sleep(config.DRAIN_S);
 
   const digests = clients.map((c) => c.digest());
-  const rooms = evaluateRooms(digests);
+  const lostIds = new Set(clients.filter((client) => !client.isOnline).map((client) => client.clientId));
+  const rooms = evaluateRooms(digests, lostIds);
+  const clientsLost = lostIds.size;
+  const clientsNotConverged = rooms.reduce((sum, room) => sum + room.notConvergedClients, 0);
   const latency = recorder.summary();
   const generationS = Math.max(0.001, config.WARMUP_S + config.DURATION_S);
   const load = assessLoad({
@@ -90,18 +93,26 @@ async function main(): Promise<void> {
     load,
     rooms: rooms.length,
     divergedRooms: rooms.filter((r) => r.diverged).length,
+    clientsLost,
+    clientsNotConverged,
     reliability: reliability(rooms),
   };
+  if (clientsLost > 0) {
+    const sample = [...lostIds].slice(0, 20).join(',');
+    console.error(`clients_lost=${clientsLost} clients_not_converged=${clientsNotConverged} sample=${sample}`);
+  }
   const directory = join(config.OUT_DIR, config.RUN_ID, `shard-${config.SHARD_INDEX}`);
   mkdirSync(directory, { recursive: true });
   recorder.writeCsv(directory);
-  writeFileSync(join(directory, 'rooms.csv'), 'room,replicas,diverged\n' +
-    rooms.map((r) => `${r.roomId},${r.replicas},${r.diverged ? 1 : 0}`).join('\n') + '\n');
+  writeFileSync(join(directory, 'rooms.csv'), 'room,replicas,diverged,lost,not_converged\n' +
+    rooms.map((r) => `${r.roomId},${r.replicas},${r.diverged ? 1 : 0},${r.lostClients},${r.notConvergedClients}`).join('\n') + '\n');
   writeFileSync(join(directory, 'replicas.csv'), 'room,client,digest\n' +
     digests.map((d) => `${d.roomId},${d.clientId},${d.digest}`).join('\n') + '\n');
   writeFileSync(join(directory, 'summary.json'), JSON.stringify(summary, null, 2));
   console.log(JSON.stringify({
-    broker: summary.broker, latency: summary.latency, load: summary.load, R: summary.reliability, counters: summary.counters,
+    broker: summary.broker, latency: summary.latency, load: summary.load, R: summary.reliability,
+    rooms_diverged: summary.divergedRooms, clients_lost: summary.clientsLost,
+    clients_not_converged: summary.clientsNotConverged, counters: summary.counters,
   }));
   clients.forEach((c) => c.close());
   process.exit(0);

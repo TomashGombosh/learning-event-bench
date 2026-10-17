@@ -5,6 +5,7 @@ import { latencyOf } from '@domain/latency';
 import { ReplicaDigest } from '@domain/reliability';
 import { CatchUpResult } from '@application/use-cases/catch-up.use-case';
 import { preciseNowMs } from './clock';
+import { ConnectGate, FailoverState, initialFailover, noteFailure, pickGateway } from './gateway-failover';
 import { LatencyRecorder } from './latency-recorder';
 import { PoissonSchedule } from './poisson-schedule';
 import { YjsReplica } from './yjs-replica';
@@ -24,8 +25,17 @@ export interface MeasurementWindow {
 
 const ACK_TIMEOUT_MS = 8_000;
 const CONNECT_TIMEOUT_MS = 5_000;
-const MAX_RECONNECT_ATTEMPTS = 6;
 const MAX_CATCH_UP_PAGES = 64;
+/** First connection only. Mid-run failover keeps trying until the cell closes. */
+const INITIAL_CONNECT_DEADLINE_MS = 30_000;
+/** `docker compose kill` does not restart the gateway (`restart: no`). Leave that URL alone. */
+const SESSION_DOWN_COOLDOWN_MS = 30_000;
+/** A refused handshake (reconnect storm, or the dead port) is retried on the next URL. */
+const HANDSHAKE_COOLDOWN_MS = 1_000;
+const RECONNECT_BASE_MS = 200;
+const RECONNECT_MAX_MS = 2_000;
+/** One shard must not open hundreds of websockets in the same millisecond after a kill. */
+const reconnectGate = new ConnectGate(32);
 
 /**
  * One simulated student: a Yjs replica attached to a gateway via Socket.IO.
@@ -40,7 +50,12 @@ export class SimulatedClient {
   private online = false;
   private intentionalDisconnect = false;
   private generating = false;
-  private gatewayIndex: number;
+  private readonly failover: FailoverState;
+  /** Set once join/catch-up has succeeded on the current socket. */
+  private sessionReady = false;
+  private closed = false;
+  private pendingFailoverFrom: string | null = null;
+  private lastConnectError: unknown = null;
   /** While a catch-up is in flight, live events must not advance lastSeenId (gap safety). */
   private catchingUp = false;
   private lastLiveIdDuringCatchUp: string | null = null;
@@ -63,7 +78,7 @@ export class SimulatedClient {
     private readonly recorder: LatencyRecorder,
     readonly counters: ClientCounters,
   ) {
-    this.gatewayIndex = Math.abs(hashCode(clientId)) % gatewayUrls.length;
+    this.failover = initialFailover(clientId, gatewayUrls.length);
   }
 
   /**
@@ -85,8 +100,9 @@ export class SimulatedClient {
     this.schedule.reset(startMs);
   }
 
-  async connect(): Promise<void> {
-    const socket = io(this.gatewayUrls[this.gatewayIndex], {
+  private async connect(): Promise<void> {
+    this.sessionReady = false;
+    const socket = io(this.gatewayUrls[this.failover.index], {
       transports: ['websocket'],
       upgrade: false,
       // false disables compression. The published client type only lists the options object.
@@ -103,6 +119,7 @@ export class SimulatedClient {
     await this.waitUntilConnected(socket);
     await this.catchUp();
     this.online = true;
+    this.sessionReady = true;
     this.unacknowledged.forEach((event) => this.emitWithOutbox(event));
   }
 
@@ -133,25 +150,23 @@ export class SimulatedClient {
   disconnect(): void {
     this.intentionalDisconnect = true;
     this.online = false;
+    this.sessionReady = false;
     this.socket?.disconnect();
   }
 
   /** First connection. Does not skip the schedule; `arm` starts it after everyone is up. */
   open(): Promise<void> {
     this.intentionalDisconnect = false;
-    this.inFlightReconnect ??= this.connectWithRetry().finally(() => {
-      this.inFlightReconnect = null;
-    });
-    return this.inFlightReconnect;
+    this.closed = false;
+    return this.kickReconnect(INITIAL_CONNECT_DEADLINE_MS);
   }
 
   reconnect(): Promise<void> {
     this.intentionalDisconnect = false;
+    this.closed = false;
     this.schedule.skipUntil(preciseNowMs());
-    this.inFlightReconnect ??= this.connectWithRetry().finally(() => {
-      this.inFlightReconnect = null;
-    });
-    return this.inFlightReconnect;
+    if (this.online) return Promise.resolve();
+    return this.kickReconnect(null);
   }
 
   get isOnline(): boolean {
@@ -165,7 +180,10 @@ export class SimulatedClient {
   }
 
   close(): void {
+    this.closed = true;
     this.intentionalDisconnect = true;
+    this.online = false;
+    this.socket?.removeAllListeners();
     this.socket?.disconnect();
   }
 
@@ -233,30 +251,85 @@ export class SimulatedClient {
     return result.truncated;
   }
 
-  /** Unexpected drop (e.g. gateway killed): fail over to the next gateway. */
+  /**
+   * Unexpected drop. The smoke-run clients that logged `reconnect gave up`
+   * (c1-9, c40-6, c9-13, c34-6, c2-14, c46-14) all hashed onto gateway2.
+   * `docker compose kill` leaves that container down (`restart: no`). Seven
+   * attempts at 200 ms still cycled back onto it and then stopped, so those
+   * clients never stayed on gateway1 or gateway3. A live session marks that
+   * URL down for 30 s. Later handshakes use the other URLs and continue until
+   * one accepts or the cell closes.
+   */
   private onDisconnect(): void {
+    const droppedLiveSession = this.sessionReady;
     this.online = false;
-    if (this.intentionalDisconnect) return;
-    this.gatewayIndex = (this.gatewayIndex + 1) % this.gatewayUrls.length;
-    setTimeout(() => void this.reconnect(), 200);
+    this.sessionReady = false;
+    if (this.intentionalDisconnect || this.closed) return;
+    if (droppedLiveSession) {
+      const failed = this.failover.index;
+      this.pendingFailoverFrom = this.gatewayUrls[failed];
+      noteFailure(this.failover, failed, preciseNowMs(), SESSION_DOWN_COOLDOWN_MS);
+      this.failover.index = (failed + 1) % this.gatewayUrls.length;
+    }
+    void this.kickReconnect(null);
   }
 
-  private async connectWithRetry(attempt = 0): Promise<void> {
-    try {
-      this.socket?.removeAllListeners();
-      this.socket?.disconnect();
-      await this.connect();
-    } catch (error) {
-      this.gatewayIndex = (this.gatewayIndex + 1) % this.gatewayUrls.length;
-      if (attempt < MAX_RECONNECT_ATTEMPTS) {
-        await new Promise((r) => setTimeout(r, 200));
-        await this.connectWithRetry(attempt + 1);
+  private kickReconnect(deadlineMs: number | null): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    this.inFlightReconnect ??= this.reconnectLoop(deadlineMs).finally(() => {
+      this.inFlightReconnect = null;
+    });
+    return this.inFlightReconnect;
+  }
+
+  private async reconnectLoop(deadlineMs: number | null): Promise<void> {
+    const started = preciseNowMs();
+    let delayMs = RECONNECT_BASE_MS;
+    while (!this.closed && !this.intentionalDisconnect) {
+      if (deadlineMs !== null && preciseNowMs() - started >= deadlineMs) {
+        const message = this.lastConnectError instanceof Error ? this.lastConnectError.message : this.lastConnectError;
+        console.error(`reconnect gave up ${this.clientId} after ${deadlineMs}ms:`, message ?? 'offline');
         return;
       }
-      console.error(
-        `reconnect gave up ${this.clientId} after ${MAX_RECONNECT_ATTEMPTS + 1} attempts:`,
-        error instanceof Error ? error.message : error,
-      );
+      const now = preciseNowMs();
+      const index = pickGateway(this.failover, now);
+      if (index === null) {
+        const soonest = Math.min(...this.failover.blockedUntil);
+        await delay(Math.max(50, soonest - now));
+        continue;
+      }
+      try {
+        await reconnectGate.acquire();
+        try {
+          if (this.closed || this.intentionalDisconnect) return;
+          this.socket?.removeAllListeners();
+          this.socket?.disconnect();
+          await this.connect();
+        } finally {
+          reconnectGate.release();
+        }
+        if (this.intentionalDisconnect || this.closed) {
+          this.online = false;
+          this.sessionReady = false;
+          this.socket?.removeAllListeners();
+          this.socket?.disconnect();
+          return;
+        }
+        // The socket can drop after join, while this attempt is still the in-flight loop.
+        // onDisconnect cannot start a second loop until this one returns, so keep going.
+        if (!this.online) continue;
+        if (this.pendingFailoverFrom && this.pendingFailoverFrom !== this.gatewayUrls[index]) {
+          console.log(`failover ${this.clientId} ${this.pendingFailoverFrom} -> ${this.gatewayUrls[index]}`);
+        }
+        this.pendingFailoverFrom = null;
+        return;
+      } catch (error) {
+        this.lastConnectError = error;
+        noteFailure(this.failover, index, preciseNowMs(), HANDSHAKE_COOLDOWN_MS);
+        const jitter = Math.floor(Math.random() * 300);
+        await delay(delayMs + jitter);
+        delayMs = Math.min(delayMs * 2, RECONNECT_MAX_MS);
+      }
     }
   }
 
@@ -314,8 +387,6 @@ export class SimulatedClient {
   }
 }
 
-function hashCode(value: string): number {
-  let hash = 0;
-  for (let i = 0; i < value.length; i++) hash = (Math.imul(31, hash) + value.charCodeAt(i)) | 0;
-  return hash;
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

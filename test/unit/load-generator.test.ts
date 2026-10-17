@@ -1,3 +1,4 @@
+import { ConnectGate, initialFailover, noteFailure, pickGateway } from '../../apps/load-generator/gateway-failover';
 import { assessLoad } from '../../apps/load-generator/load-report';
 import { PoissonSchedule } from '../../apps/load-generator/poisson-schedule';
 import { exponentialSeconds, seededRandom } from '../../apps/load-generator/random';
@@ -88,6 +89,48 @@ describe('load generator building blocks', () => {
     await new Promise((resolve) => setTimeout(resolve, 40));
     scheduler.stop();
     expect(calls).toBeGreaterThanOrEqual(4);
+  });
+
+  it('skips a killed gateway instead of hashing those clients back onto it', () => {
+    // Smoke cell 005: these six clients logged `reconnect gave up` and all hash to gateway2 (index 1).
+    for (const clientId of ['c1-9', 'c40-6', 'c9-13', 'c34-6', 'c2-14', 'c46-14']) {
+      const state = initialFailover(clientId, 3);
+      expect(state.index).toBe(1);
+      noteFailure(state, 1, 1_000, 30_000);
+      state.index = 2;
+      expect(pickGateway(state, 1_000)).toBe(2);
+      noteFailure(state, 2, 1_200, 1_000);
+      expect(pickGateway(state, 1_200)).toBe(0);
+      expect(pickGateway(state, 1_200)).toBe(0);
+      expect(pickGateway(state, 31_000)).toBe(0);
+      state.index = 1;
+      expect(pickGateway(state, 31_000)).toBe(1);
+    }
+  });
+
+  it('waits when every gateway is cooling down', () => {
+    const state = initialFailover('c1-9', 3);
+    noteFailure(state, 0, 0, 5_000);
+    noteFailure(state, 1, 0, 5_000);
+    noteFailure(state, 2, 0, 5_000);
+    expect(pickGateway(state, 1_000)).toBeNull();
+    expect(pickGateway(state, 5_000)).toBe(state.index);
+  });
+
+  it('caps concurrent connection attempts', async () => {
+    const gate = new ConnectGate(2);
+    let active = 0;
+    let max = 0;
+    await Promise.all(Array.from({ length: 8 }, async () => {
+      await gate.acquire();
+      active += 1;
+      max = Math.max(max, active);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      active -= 1;
+      gate.release();
+    }));
+    expect(max).toBeLessThanOrEqual(2);
+    expect(max).toBe(2);
   });
 
   it('Yjs updates are idempotent and order-independent (safe for catch-up duplicates)', () => {

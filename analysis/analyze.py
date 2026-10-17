@@ -37,7 +37,10 @@ def load_runs(results: Path, matrix: Path) -> tuple[pd.DataFrame, dict[str, np.n
         saturated = any(bool(s.get("load", {}).get("saturated")) for s in summaries)
         runs.append(dict({k: v for k, v in row._asdict().items() if k != "Index"}, n_samples=len(lat), p50=np.percentile(lat, 50), p95=np.percentile(lat, 95),
                          p99=np.percentile(lat, 99), mean=lat.mean(), rooms_total=len(rm),
-                         rooms_diverged=int(rm["diverged"].sum()), sent=sum(c["sent"] for c in counters),
+                         rooms_diverged=int(rm["diverged"].sum()),
+                         clients_lost=sum(int(s.get("clientsLost", 0)) for s in summaries),
+                         clients_not_converged=sum(int(s.get("clientsNotConverged", 0)) for s in summaries),
+                         sent=sum(c["sent"] for c in counters),
                          saturated=saturated))
     return pd.DataFrame(runs), samples, pd.concat(rooms) if rooms else pd.DataFrame()
 

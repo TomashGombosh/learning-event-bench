@@ -5,7 +5,13 @@ Interactive Learning Environments: Experimental Validation for Redis Pub/Sub, Re
 (T. Hombosh, P. Mulesa, Uzhhorod National University). It continues
 [Hombosh & Mulesa, 2026, vol. 49](https://doi.org/10.24144/2616-7700.2026.49(2).173-180) by measuring
 end-to-end latency **T** and synchronisation reliability **R = 1 − N_diverged / N_total** of Yjs (CRDT)
-collaborative sessions under three message brokers.
+collaborative sessions under three message brokers. A room is diverged when its online replicas do not
+share one digest, **or when any client in the room is lost**. A client is lost (`clients_lost`) when it
+is offline at the end of the cell (the connect failed, or reconnect never reached a live gateway).
+That room does not count as converged just because the clients that stayed up agree. A client is not
+converged (`clients_not_converged`) when it is lost, or when it is online but its digest is not the
+strict majority of the room (every client, if there is no majority). `clients_lost` is included in
+`clients_not_converged`. Both are in `summary.json` and in `results/_analysis/runs.csv`.
 
 ## Architecture (Clean Architecture, R. C. Martin)
 
@@ -40,8 +46,12 @@ enforced by `test/architecture/dependency-rule.test.ts`.
 5. On reconnect a client sends its last seen event id; `CatchUpAfterReconnectUseCase` replays missed events
    (Redis Streams: `XRANGE`; Kafka: short-lived consumer seeking the room partition; Pub/Sub: unsupported).
 6. Clients keep an outbox of unacknowledged operations and re-send them after reconnecting
-   (Yjs updates are idempotent, so duplicates are harmless).
-7. At the end, every replica reports a SHA-256 digest of its text; a room has diverged if digests differ.
+   (Yjs updates are idempotent, so duplicates are harmless). Each client starts on
+   `hash(clientId) % N` of `GATEWAY_URLS`. A dropped session leaves that URL for 30 s
+   (`docker compose kill` does not restart the container) and keeps dialing the other
+   gateways, with a cap of 32 handshakes in flight, until one accepts.
+7. At the end, every replica reports a SHA-256 digest of its text. A room has diverged if those digests
+   disagree, or if any of its clients is offline (`clients_lost`). See the definition of R above.
 
 ## Quick start (no Docker)
 
@@ -81,7 +91,7 @@ See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Ac
 | load generator | `NETEM` | – | e.g. `delay 10ms 5ms distribution normal` (needs `NET_ADMIN`) |
 
 ### Outputs (per run and shard: `results/<run>/shard-<i>/`)
-`summary.json` (config, counters, HDR percentiles, R), `latency_percentiles.csv`, `latency_samples.csv`
+`summary.json` (config, counters, HDR percentiles, R, `clientsLost`, `clientsNotConverged`), `latency_percentiles.csv`, `latency_samples.csv`
 (uniform reservoir of raw samples with uplink/downlink split), `rooms.csv`, `replicas.csv`.
 
 ## Known limitations

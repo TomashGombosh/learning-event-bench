@@ -89,7 +89,6 @@
       "Action": [
         "logs:CreateLogGroup",
         "logs:PutRetentionPolicy",
-        "logs:DeleteLogGroup",
         "logs:DescribeLogGroups",
         "logs:TagResource",
         "logs:ListTagsForResource"
