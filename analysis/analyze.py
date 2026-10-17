@@ -26,14 +26,19 @@ def load_runs(results: Path, matrix: Path) -> tuple[pd.DataFrame, dict[str, np.n
         shards = sorted((results / row.run_id).glob("shard-*/summary.json"))
         if not shards:
             continue
-        lat = np.concatenate([pd.read_csv(s.parent / "latency_samples.csv")["total_ms"].to_numpy() for s in shards])
+        frames = [pd.read_csv(s.parent / "latency_samples.csv") for s in shards]
+        # service_ms is send->receive. total_ms includes open-loop generator lag.
+        lat = np.concatenate([(f["service_ms"] if "service_ms" in f.columns else f["total_ms"]).to_numpy() for f in frames])
         rm = pd.concat([pd.read_csv(s.parent / "rooms.csv") for s in shards])
         samples[row.run_id] = lat
         rooms.append(rm.assign(run_id=row.run_id))
-        counters = [json.loads(s.read_text())["counters"] for s in shards]
+        summaries = [json.loads(s.read_text()) for s in shards]
+        counters = [s["counters"] for s in summaries]
+        saturated = any(bool(s.get("load", {}).get("saturated")) for s in summaries)
         runs.append(dict({k: v for k, v in row._asdict().items() if k != "Index"}, n_samples=len(lat), p50=np.percentile(lat, 50), p95=np.percentile(lat, 95),
                          p99=np.percentile(lat, 99), mean=lat.mean(), rooms_total=len(rm),
-                         rooms_diverged=int(rm["diverged"].sum()), sent=sum(c["sent"] for c in counters)))
+                         rooms_diverged=int(rm["diverged"].sum()), sent=sum(c["sent"] for c in counters),
+                         saturated=saturated))
     return pd.DataFrame(runs), samples, pd.concat(rooms) if rooms else pd.DataFrame()
 
 

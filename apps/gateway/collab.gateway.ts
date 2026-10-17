@@ -32,7 +32,7 @@ export class CollabGateway implements OnGatewayInit {
   async join(@ConnectedSocket() client: Socket, @MessageBody() request: JoinRequest): Promise<CatchUpResult> {
     await this.relay.ensureRelaying(request.roomId);
     await client.join(request.roomId);
-    if (request.lastSeenId === undefined) return { supported: true, missed: [] };
+    if (request.lastSeenId === undefined) return { supported: true, missed: [], truncated: false };
     return this.catchUp.execute(request.roomId, request.lastSeenId);
   }
 

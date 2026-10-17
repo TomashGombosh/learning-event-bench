@@ -13,6 +13,9 @@ export interface DisconnectPlan {
   readonly meanOfflineSeconds: number;
 }
 
+/** A stuck reconnect must not pin the cell. The per-cell `timeout` is the outer bound. */
+const RESTORE_DEADLINE_MS = 45_000;
+
 /** Injects Poisson-distributed client disconnects with exponential durations. */
 export class DisconnectInjector {
   private readonly timers = new Set<NodeJS.Timeout>();
@@ -31,7 +34,27 @@ export class DisconnectInjector {
     this.active = false;
     this.timers.forEach(clearTimeout);
     this.timers.clear();
-    await Promise.all(clients.filter((c) => !c.isOnline).map((c) => c.reconnect()));
+    await Promise.all(clients.filter((c) => !c.isOnline).map((client) => this.restoreOne(client)));
+  }
+
+  private restoreOne(client: Disconnectable): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        console.error('reconnect deadline exceeded; leaving client offline');
+        resolve();
+      }, RESTORE_DEADLINE_MS);
+      client.reconnect().then(
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          console.error('reconnect failed', error);
+          resolve();
+        },
+      );
+    });
   }
 
   private scheduleNext(client: Disconnectable): void {

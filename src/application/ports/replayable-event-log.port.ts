@@ -5,7 +5,11 @@ import { EventId, StoredEvent } from '@domain/collab-event';
  * Redis Pub/Sub cannot implement it, Redis Streams and Kafka can.
  */
 export interface ReplayableEventLogPort {
-  readAfter(roomId: string, lastId: EventId | null): Promise<StoredEvent[]>;
+  /**
+   * Events strictly after `lastId` (or the whole log when `lastId` is null).
+   * `limit` caps the page so a reconnect ack cannot grow without bound.
+   */
+  readAfter(roomId: string, lastId: EventId | null, limit?: number): Promise<StoredEvent[]>;
 }
 
 export const EVENT_LOG = Symbol('ReplayableEventLogPort');

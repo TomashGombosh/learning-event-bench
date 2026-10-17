@@ -13,7 +13,11 @@ export interface RedisStreamsOptions {
   readonly blockMs: number;
 }
 
-/** Event Sourcing on Redis Streams: the room stream is the single source of truth. */
+/**
+ * Event Sourcing on Redis Streams: the room stream is the single source of truth.
+ * Reads are XREAD / XRANGE on a dedicated connection. There is no consumer group,
+ * so a killed gateway does not leave pending entries (no XREADGROUP, no PEL).
+ */
 export class RedisStreamsEventBus implements EventBusPort, ReplayableEventLogPort {
   readonly name = 'redis-streams';
   private readonly writer: Redis;
@@ -48,9 +52,12 @@ export class RedisStreamsEventBus implements EventBusPort, ReplayableEventLogPor
     return { unsubscribe: async () => void this.handlers.get(roomId)?.delete(handler) };
   }
 
-  async readAfter(roomId: string, lastId: EventId | null): Promise<StoredEvent[]> {
+  async readAfter(roomId: string, lastId: EventId | null, limit?: number): Promise<StoredEvent[]> {
     const start = lastId === null ? '-' : `(${lastId}`;
-    const entries = await this.writer.xrange(roomStreamKey(roomId), start, '+');
+    const key = roomStreamKey(roomId);
+    const entries = limit === undefined
+      ? await this.writer.xrange(key, start, '+')
+      : await this.writer.xrange(key, start, '+', 'COUNT', limit);
     return entries.map(([id, fields]) => ({ id, event: decodeEvent(fields[1]) }));
   }
 

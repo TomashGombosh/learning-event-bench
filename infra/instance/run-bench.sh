@@ -48,8 +48,17 @@ write_meta() {
 JSON
 }
 
+stop_watchdog() {
+  if [ -n "${watchdog_pid:-}" ]; then
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    watchdog_pid=""
+  fi
+}
+
 on_exit() {
   local rc=$?
+  stop_watchdog
   if [ "$rc" -eq 0 ]; then
     return 0
   fi
@@ -65,6 +74,15 @@ trap on_exit EXIT
 
 write_meta running
 /opt/leb/sync-results.sh
+# shellcheck source=experiments/lib/budget.sh
+source "$REPO/experiments/lib/budget.sh"
+DURATION_S="${BENCH_DURATION_S}"
+apply_window_defaults "$DURATION_S"
+export DURATION_S WARMUP_S DRAIN_S KILL_AT_S
+CELL_TIMEOUT_S="$(cell_timeout_seconds "$WARMUP_S" "$DURATION_S" "$DRAIN_S")"
+export CELL_TIMEOUT_S
+COMPOSE_UP_TIMEOUT_S="${COMPOSE_UP_TIMEOUT_S:-180}"
+watchdog_pid=""
 # Root (see leb-bench.service). docker.sock does not use the ubuntu docker group.
 # BuildKit records git metadata; the repo is owned by ubuntu, so root needs safe.directory.
 # --system does not need HOME (systemd still sets HOME=/root on the unit).
@@ -84,8 +102,32 @@ if ! docker compose build gateway1; then
   echo "docker compose build failed"
   exit 1
 fi
-(cd experiments && python3 make_matrix.py "${BENCH_REPS}")
-DURATION_S="${BENCH_DURATION_S}" ./experiments/run_matrix.sh experiments/configs/matrix.csv 2>&1 | tee -a results/run.log
+# bench_reps=1 is the smoke knob used by short live runs. The full factorial at
+# reps=1 is still ~32 cells (stage A is 2 reps; B and C are 4×3 and 3×2×2), and
+# each cell paid a Kafka cold start plus 30s warmup, so "smoke" ran for hours.
+if [ "${BENCH_SMOKE:-0}" = "1" ] || [ "${BENCH_REPS}" = "1" ]; then
+  echo "smoke matrix: bench_reps=${BENCH_REPS} selects a handful of cells (reps>=2 is the full factorial)"
+  (cd experiments && python3 make_matrix.py smoke)
+else
+  (cd experiments && python3 make_matrix.py "${BENCH_REPS}")
+fi
+cells="$(tail -n +2 experiments/configs/matrix.csv | grep -c . || true)"
+# One cell may spend the compose-up budget plus the loadgen timeout. The watchdog
+# is that wall time times the matrix, plus a few minutes to upload. It calls the
+# same path as a failed bench: sync results and bench.log to S3, then power off.
+watchdog_s=$(( cells * (COMPOSE_UP_TIMEOUT_S + CELL_TIMEOUT_S + 45) + 300 ))
+echo "watchdog ${watchdog_s}s for ${cells} cells (per-cell loadgen timeout ${CELL_TIMEOUT_S}s)"
+(
+  sleep "$watchdog_s"
+  echo "global watchdog: wall clock ${watchdog_s}s exceeded; uploading logs and powering off"
+  if [ -x /opt/leb/bench-failed.sh ]; then
+    /opt/leb/bench-failed.sh
+  else
+    "$REPO/infra/instance/bench-failed.sh"
+  fi
+) &
+watchdog_pid=$!
+./experiments/run_matrix.sh experiments/configs/matrix.csv 2>&1 | tee -a results/run.log
 matrix_rc=${PIPESTATUS[0]}
 if [ "$matrix_rc" -ne 0 ] || ! ls results/*/shard-*/summary.json >/dev/null 2>&1; then
   echo "benchmark produced no cell results (matrix exit ${matrix_rc})"

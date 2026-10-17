@@ -33,7 +33,7 @@ variable "git_ref" {
 }
 
 variable "bench_reps" {
-  description = "Repetitions per matrix cell (5 -> 128 runs, ~12 h)."
+  description = "Repetitions per matrix cell (1 = 6-cell smoke; 5 -> 128 runs, ~12 h)."
   type        = number
   default     = 5
 }

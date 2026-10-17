@@ -8,7 +8,7 @@ on:
         default: c7g.2xlarge
         type: string
       bench_reps:
-        description: Repetitions per matrix cell (5 = 128 runs, about 12 h)
+        description: Repetitions per matrix cell (1 = smoke, 6 cells; 5 = 128 runs, about 12 h)
         default: "5"
         type: string
       bench_duration_s:

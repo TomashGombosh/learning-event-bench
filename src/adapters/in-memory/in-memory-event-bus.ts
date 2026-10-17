@@ -22,9 +22,10 @@ export class InMemoryEventBus implements EventBusPort, ReplayableEventLogPort {
     return { unsubscribe: async () => void this.handlers.get(roomId)?.delete(handler) };
   }
 
-  async readAfter(roomId: string, lastId: EventId | null): Promise<StoredEvent[]> {
+  async readAfter(roomId: string, lastId: EventId | null, limit?: number): Promise<StoredEvent[]> {
     const from = lastId === null ? 0 : Number(lastId);
-    return this.logOf(roomId).slice(from);
+    const slice = this.logOf(roomId).slice(from);
+    return limit === undefined ? slice : slice.slice(0, limit);
   }
 
   async close(): Promise<void> {
