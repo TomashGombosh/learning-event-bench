@@ -5,9 +5,9 @@ variable "region" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type. Default c7g.2xlarge (Graviton3, 8 vCPU / 16 GiB). The Ubuntu AMI matches supported_architectures (arm64 or x86_64)."
+  description = "EC2 instance type. Default c7g.4xlarge (Graviton3, 16 vCPU / 32 GiB, us-east-1). The Ubuntu AMI matches supported_architectures (arm64 or x86_64)."
   type        = string
-  default     = "c7g.2xlarge"
+  default     = "c7g.4xlarge"
 }
 
 variable "results_bucket" {
@@ -33,7 +33,7 @@ variable "git_ref" {
 }
 
 variable "bench_profile" {
-  description = "smoke = 6 cells x 60s (default). full = factorial using bench_reps and bench_duration_s (~12 h at the defaults)."
+  description = "smoke = 6 cells x 60s (default). full = factorial using bench_reps and bench_duration_s (~12.5 h on c7g.4xlarge)."
   type        = string
   default     = "smoke"
 
@@ -44,7 +44,7 @@ variable "bench_profile" {
 }
 
 variable "bench_reps" {
-  description = "Repetitions per matrix cell when bench_profile=full (5 -> 128 runs, ~12 h). Ignored for smoke."
+  description = "Repetitions per matrix cell when bench_profile=full (5 -> 128 runs, ~12.5 h on c7g.4xlarge). Ignored for smoke."
   type        = number
   default     = 5
 }

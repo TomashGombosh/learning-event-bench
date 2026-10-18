@@ -19,16 +19,16 @@ export function assessLoad(input: {
   readonly achievedDeliveryPerSec: number;
   readonly scheduleLagP50Ms: number;
   readonly serviceP50Ms: number;
-  /** Disconnects lower the send rate without the generator being CPU-bound. */
-  readonly disconnectsPerMin: number;
 }): LoadAssessment {
   const reasons: string[] = [];
   if (input.scheduleLagP50Ms > 250) {
     reasons.push(`generator schedule lag p50 ${Math.round(input.scheduleLagP50Ms)}ms`);
   }
-  if (input.disconnectsPerMin <= 0 && input.offeredPerSec > 0 && input.achievedSendPerSec < 0.8 * input.offeredPerSec) {
+  // Fault injection used to exempt a short rate. A cell that delivers under 95% of the
+  // offered load is saturated either way: the broker (or the generator) did not keep up.
+  if (input.offeredPerSec > 0 && input.achievedSendPerSec < 0.95 * input.offeredPerSec) {
     reasons.push(
-      `achieved send ${input.achievedSendPerSec.toFixed(1)}/s vs offered ${input.offeredPerSec.toFixed(1)}/s`,
+      `achieved send ${input.achievedSendPerSec.toFixed(1)}/s is under 95% of offered ${input.offeredPerSec.toFixed(1)}/s`,
     );
   }
   if (input.serviceP50Ms > 5_000) {

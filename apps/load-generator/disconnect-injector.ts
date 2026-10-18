@@ -30,10 +30,15 @@ export class DisconnectInjector {
     clients.forEach((client) => this.scheduleNext(client));
   }
 
-  async stopAndRestore(clients: readonly Disconnectable[]): Promise<void> {
+  /** Drop pending fault timers without waiting for reconnects. */
+  stop(): void {
     this.active = false;
     this.timers.forEach(clearTimeout);
     this.timers.clear();
+  }
+
+  async stopAndRestore(clients: readonly Disconnectable[]): Promise<void> {
+    this.stop();
     await Promise.all(clients.filter((c) => !c.isOnline).map((client) => this.restoreOne(client)));
   }
 

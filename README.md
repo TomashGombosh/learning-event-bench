@@ -71,7 +71,7 @@ python3 -m venv .venv && .venv/bin/pip install -r analysis/requirements.txt pyte
 ```bash
 docker compose build
 python3 experiments/make_matrix.py          # 128 randomised runs (stages A, B, C)
-./experiments/run_matrix.sh                 # ~12 h on c7i.4xlarge, resumable
+./experiments/run_matrix.sh                 # ~12.5 h on c7g.4xlarge, resumable
 .venv/bin/python analysis/analyze.py results experiments/configs/matrix.csv
 ```
 

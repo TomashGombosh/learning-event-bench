@@ -1,10 +1,10 @@
 # Single-host stand. CPUs are pinned so the generator cannot starve the brokers and the reverse.
-# Defaults match 16 vCPU (c7i.4xlarge / c7g.4xlarge): one gateway pair of cores each, redis, kafka,
-# loadgen on 10-15 (6 cores, SHARDS=6). The cpuset is the limit: a container cannot
+# Defaults match the 16 vCPU default instance (c7g.4xlarge): one core per gateway, redis on 2,
+# kafka on 4, loadgen on the remaining 7 (SHARDS=7). The cpuset is the limit: a container cannot
 # run on any other core. run-bench.sh overrides the sets from nproc.
-# c7g.2xlarge (8 vCPU, the default instance): gateway1=0 gateway2=1 gateway3=2 redis=3 kafka=4
-# loadgen=5-7 (3 cores, 3 shards). A second loadgen host is not used: it would add a VPC hop to T,
-# and 3 cores sustain L5000 once the generator is not timer-bound.
+#   gateway1=0 gateway2=1 gateway3=2 redis=3-4 kafka=5-8 loadgen=9-15
+# 8 vCPU fallback (c7g.2xlarge): gateway1=0 gateway2=1 gateway3=2 redis=3 kafka=4 loadgen=5-7
+# (3 cores, 3 shards). A second loadgen host is not used: it would add a VPC hop to T.
 # One service owns the build. Compose v2 builds every service that has `build:` in
 # parallel and tags them all broker-bench:latest, which BuildKit rejects
 # ("image already exists"). gateway2/3 and loadgen only consume the local tag.
@@ -17,7 +17,7 @@ x-gateway: &gateway
     KAFKA_BROKERS: kafka:9092
     KAFKA_PARTITIONS: ${KAFKA_PARTITIONS:-12}
     STREAM_MAXLEN: ${STREAM_MAXLEN:-10000}
-  cpuset: ${CPUSET_GATEWAYS:-0-1}
+  cpuset: ${CPUSET_GATEWAYS:-0}
   depends_on:
     redis: { condition: service_healthy }
     kafka: { condition: service_healthy }
@@ -27,7 +27,7 @@ services:
   redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
-    cpuset: ${CPUSET_REDIS:-6-7}
+    cpuset: ${CPUSET_REDIS:-3-4}
     healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 2s, retries: 30 }
 
   kafka:
@@ -45,7 +45,13 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 12
-    cpuset: ${CPUSET_KAFKA:-8-9}
+      # 4 dedicated cores on c7g.4xlarge. 2G heap fits 16 GiB and 32 GiB hosts.
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms2G -Xmx2G}
+      KAFKA_NUM_NETWORK_THREADS: ${KAFKA_NUM_NETWORK_THREADS:-8}
+      KAFKA_NUM_IO_THREADS: ${KAFKA_NUM_IO_THREADS:-16}
+      KAFKA_SOCKET_SEND_BUFFER_BYTES: ${KAFKA_SOCKET_SEND_BUFFER_BYTES:-1048576}
+      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: ${KAFKA_SOCKET_RECEIVE_BUFFER_BYTES:-1048576}
+    cpuset: ${CPUSET_KAFKA:-5-8}
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
       interval: 3s
@@ -54,15 +60,15 @@ services:
   gateway1:
     <<: *gateway
     build: .
-    cpuset: ${CPUSET_GATEWAY1:-0-1}
+    cpuset: ${CPUSET_GATEWAY1:-0}
     ports: ["3001:3000"]
   gateway2:
     <<: *gateway
-    cpuset: ${CPUSET_GATEWAY2:-2-3}
+    cpuset: ${CPUSET_GATEWAY2:-1}
     ports: ["3002:3000"]
   gateway3:
     <<: *gateway
-    cpuset: ${CPUSET_GATEWAY3:-4-5}
+    cpuset: ${CPUSET_GATEWAY3:-2}
     ports: ["3003:3000"]
 
   loadgen:
@@ -70,12 +76,13 @@ services:
     pull_policy: never
     profiles: ["load"]
     cap_add: [NET_ADMIN]
-    cpuset: ${CPUSET_LOADGEN:-10-15}
+    cpuset: ${CPUSET_LOADGEN:-9-15}
     volumes: ["./results:/app/results"]
     environment:
       GATEWAY_URLS: http://gateway1:3000,http://gateway2:3000,http://gateway3:3000
       NETEM: ${NETEM:-}
-    command: ["npx", "tsx", "apps/load-generator/main.ts"]
+    # node is PID 1 so the cell timeout's SIGTERM reaches the summary handler.
+    command: ["node", "--import", "tsx", "apps/load-generator/main.ts"]
 
   prometheus:
     image: prom/prometheus:v2.54.1

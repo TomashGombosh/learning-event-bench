@@ -72,7 +72,11 @@ on `/leb/bench`; `s3:ListBucket`/`s3:GetObject` on `runs/*` of the results bucke
 and `ec2:GetConsoleOutput`. Streams are `{run_id}/leb-setup.log`, `{run_id}/cloud-init-output.log`,
 `{run_id}/bench.log`, and `{run_id}/leb-bench.service`. bench-down does not delete `/leb/bench`
 (30 day retention), so those streams survive the instance. `bench.log` has one `CELL` line per cell
-(`run_id`, broker, offered/achieved, p50, p99, rooms_diverged, clients_lost). p50 and p99 on that line are the worst shard; pooled percentiles stay in the analysis artifact. A setup failure also
+(`run_id`, broker, offered/achieved, p50, p99, rooms_diverged, clients_lost, clients_not_converged).
+Offered is the matrix load, not the sum of the shard files that happened to be written. The line
+ends with `SATURATED` when achieved send is under 95% of that load, a shard summary is missing
+(`shards=N/expected`), or a shard reports itself saturated. `FAILED` is on the same line when the
+cell did not finish. p50 and p99 are the worst shard; pooled percentiles stay in the analysis artifact. A setup failure also
 uploads `s3://<results>/runs/<run_id>/setup-failed.log`.
 
 ## 3. GitHub repository settings
@@ -87,7 +91,7 @@ uploads `s3://<results>/runs/<run_id>/setup-failed.log`.
 The repository must be public (the instance clones it anonymously at the exact commit of the workflow run).
 
 ## 4. Run
-- **Actions → bench-up → Run workflow**. `profile` defaults to **smoke** (6 cells, 60 s). Choose `full` for the factorial (`bench_reps=5` is 128 cells, ~12 h). A default dispatch does not start that run. Duration ≈ runs × (duration + 90 s). Keep a full run below 40 h.
+- **Actions → bench-up → Run workflow**. `profile` defaults to **smoke** (6 cells, 60 s). Choose `full` for the factorial (`bench_reps=5` is 128 cells, ~12.5 h on c7g.4xlarge). A default dispatch does not start that run. The 240 s measurement window is unchanged (warmup 30 + drain 15 → 285 s inside the loadgen). After the first cell, Redis and Kafka stay up and only the gateways are recreated, so overhead is about a minute (prebuild, connect, digest, topic delete). Keep a full run below 40 h.
   A stuck cell is killed after `(warmup + duration + drain) × 3 + 60 s`. A watchdog of `cells × (compose-up budget + that timeout)` uploads logs to S3 and powers the instance off.
 - Progress: `aws s3 ls s3://<prefix>-results/runs/<run_id>/results/` or the `logs/` folder.
   Live setup output is also in CloudWatch log group `/leb/bench`, stream `<run_id>/leb-setup.log`
@@ -105,8 +109,8 @@ The repository must be public (the instance clones it anonymously at the exact c
 4. bench-down hourly: destroys at ≥ 41 h, or when the instance is no longer running.
 5. Deploy policy denies other instance types. Recommended extra: an AWS Budget with an e-mail alert (e.g. $30/month).
 
-## Cost (on-demand Linux, EU Frankfurt, AWS price list 13.10.2026)
-c7g.2xlarge (default, Graviton3, 8 vCPU / 16 GiB) $0.3298/h → 12 h ≈ $4.0, 41 h worst case ≈ $13.5.
-Same size in us-east-1 (the `AWS_REGION` example) is $0.2900/h → 12 h ≈ $3.5, 41 h ≈ $11.9.
-c7i.4xlarge $0.8148/h → 12 h ≈ $9.8, 41 h worst case ≈ $33.4. m7i.2xlarge $0.483/h → 41 h ≈ $19.8.
+## Cost (on-demand Linux, AWS price list 13.10.2026)
+Default is c7g.4xlarge (Graviton3, 16 vCPU / 32 GiB). us-east-1 (the `AWS_REGION` example) is $0.5800/h → full profile ~12.5 h ≈ $7.30, 41 h cap ≈ $24.
+EU Frankfurt c7g.4xlarge is $0.6596/h (twice c7g.2xlarge at $0.3298/h) → 12.5 h ≈ $8.20, 41 h ≈ $27.
+c7g.2xlarge us-east-1 is $0.2900/h if you override the instance type (8 vCPU pin, Kafka on one core). c7i.4xlarge $0.8148/h → 12 h ≈ $9.8, 41 h ≈ $33.4. m7i.2xlarge $0.483/h → 41 h ≈ $19.8.
 S3 storage for results (tens of MB) and state is negligible; GitHub Actions minutes for hourly checks are about 1 min each.

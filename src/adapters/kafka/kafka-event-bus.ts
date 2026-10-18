@@ -30,9 +30,26 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
   private partitions: number;
 
   constructor(private readonly options: KafkaOptions) {
-    this.kafka = new Kafka({ clientId: 'bench', brokers: options.brokers, logLevel: logLevel.WARN });
-    this.producer = this.kafka.producer({ idempotent: options.idempotent, maxInFlightRequests: options.idempotent ? 5 : undefined });
-    this.consumer = this.kafka.consumer({ groupId: `gateway-${randomUUID()}`, maxWaitTimeInMs: 5 });
+    this.kafka = new Kafka({
+      clientId: 'bench',
+      brokers: options.brokers,
+      logLevel: logLevel.WARN,
+      connectionTimeout: 1_000,
+      requestTimeout: 10_000,
+    });
+    // maxInFlightRequests is forwarded to the broker connection. Idempotent producers
+    // must stay at or below 5. kafkajs has no linger.ms; each send is one Produce request.
+    this.producer = this.kafka.producer({
+      idempotent: options.idempotent,
+      maxInFlightRequests: options.idempotent ? 5 : undefined,
+    });
+    this.consumer = this.kafka.consumer({
+      groupId: `gateway-${randomUUID()}`,
+      maxWaitTimeInMs: 5,
+      minBytes: 1,
+      sessionTimeout: 15_000,
+      heartbeatInterval: 1_000,
+    });
     this.admin = this.kafka.admin();
     this.partitions = options.partitions;
   }
@@ -48,10 +65,18 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     await Promise.all([this.producer.connect(), this.consumer.connect()]);
     await this.consumer.subscribe({ topic: this.options.topic, fromBeginning: false });
     await this.consumer.run({
-      eachMessage: async ({ partition, message }) => {
-        const event = decodeEvent(message.value!.toString());
-        const stored = { id: kafkaEventId(partition, message.offset), event };
-        this.handlers.get(event.roomId)?.forEach((handle) => handle(stored));
+      eachBatchAutoResolve: true,
+      eachBatch: async ({ batch, heartbeat }) => {
+        for (let i = 0; i < batch.messages.length; i++) {
+          const message = batch.messages[i];
+          if (message.value) {
+            const event = decodeEvent(message.value.toString());
+            const stored = { id: kafkaEventId(batch.partition, message.offset), event };
+            this.handlers.get(event.roomId)?.forEach((handle) => handle(stored));
+          }
+          if (i > 0 && i % 100 === 0) await heartbeat();
+        }
+        if (batch.messages.length > 0) await heartbeat();
       },
     });
   }
@@ -61,6 +86,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     const [meta] = await this.producer.send({
       topic: this.options.topic,
       acks: this.options.acks,
+      timeout: 5_000,
       messages: [{ key: event.roomId, partition, value: encodeEvent(event) }],
     });
     return kafkaEventId(partition, meta.baseOffset ?? '0');

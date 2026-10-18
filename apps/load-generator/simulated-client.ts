@@ -102,21 +102,29 @@ export class SimulatedClient {
 
   private async connect(): Promise<void> {
     this.sessionReady = false;
-    const socket = io(this.gatewayUrls[this.failover.index], {
-      transports: ['websocket'],
-      upgrade: false,
-      // false disables compression. The published client type only lists the options object.
-      // @ts-expect-error engine.io types reject `false` even though the runtime honours it
-      perMessageDeflate: false,
-      reconnection: false,
-      forceNew: true,
-    });
-    this.socket = socket;
-    socket.on('evt', (stored: StoredEvent) => this.onEvent(stored));
-    socket.on('disconnect', () => {
-      if (socket === this.socket) this.onDisconnect();
-    });
-    await this.waitUntilConnected(socket);
+    // The gate covers the handshake only. Kafka catch-up opens a consumer group
+    // (several seconds); holding a slot for that made 333 clients miss the 45 s
+    // restore deadline and stay offline.
+    await reconnectGate.acquire();
+    try {
+      const socket = io(this.gatewayUrls[this.failover.index], {
+        transports: ['websocket'],
+        upgrade: false,
+        // false disables compression. The published client type only lists the options object.
+        // @ts-expect-error engine.io types reject `false` even though the runtime honours it
+        perMessageDeflate: false,
+        reconnection: false,
+        forceNew: true,
+      });
+      this.socket = socket;
+      socket.on('evt', (stored: StoredEvent) => this.onEvent(stored));
+      socket.on('disconnect', () => {
+        if (socket === this.socket) this.onDisconnect();
+      });
+      await this.waitUntilConnected(socket);
+    } finally {
+      reconnectGate.release();
+    }
     await this.catchUp();
     this.online = true;
     this.sessionReady = true;
@@ -299,15 +307,10 @@ export class SimulatedClient {
         continue;
       }
       try {
-        await reconnectGate.acquire();
-        try {
-          if (this.closed || this.intentionalDisconnect) return;
-          this.socket?.removeAllListeners();
-          this.socket?.disconnect();
-          await this.connect();
-        } finally {
-          reconnectGate.release();
-        }
+        if (this.closed || this.intentionalDisconnect) return;
+        this.socket?.removeAllListeners();
+        this.socket?.disconnect();
+        await this.connect();
         if (this.intentionalDisconnect || this.closed) {
           this.online = false;
           this.sessionReady = false;
