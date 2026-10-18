@@ -22,6 +22,12 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
   MAX_AGE_HOURS: "41"
   TF_IN_AUTOMATION: "1"
+  # destroy loads the configuration. results_bucket and run_id have no default.
+  # The real run id is already in state; destroy addresses resources by id.
+  TF_VAR_region: ${{ vars.AWS_REGION || 'eu-central-1' }}
+  TF_VAR_results_bucket: ${{ vars.RESULTS_BUCKET }}
+  TF_VAR_permissions_boundary_arn: ${{ vars.PERMISSIONS_BOUNDARY_ARN }}
+  TF_VAR_run_id: destroy
 
 jobs:
   down:
@@ -74,12 +80,9 @@ jobs:
       - name: Terraform destroy
         if: steps.decide.outputs.destroy == 'true'
         run: |
-          # /leb/bench has prevent_destroy. Remove it from state so destroy does not
-          # try to delete the group (and its streams). The next bench-up imports it.
+          # /leb/bench has prevent_destroy. Drop it from state first: a destroy that
+          # still tracks the group fails closed on prevent_destroy, and a destroy
+          # after state rm does not plan the group at all. The next bench-up imports it.
           terraform state rm aws_cloudwatch_log_group.bench || true
-          terraform destroy -input=false -auto-approve \
-            -var "region=${AWS_REGION}" \
-            -var "results_bucket=${{ vars.RESULTS_BUCKET }}" \
-            -var "permissions_boundary_arn=${{ vars.PERMISSIONS_BOUNDARY_ARN }}" \
-            -var "run_id=$(terraform output -raw run_id 2>/dev/null || echo destroy)"
+          terraform destroy -input=false -auto-approve
           echo "### Bench infrastructure destroyed" >> "$GITHUB_STEP_SUMMARY"

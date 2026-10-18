@@ -98,6 +98,8 @@ The repository must be public (the instance clones it anonymously at the exact c
   (serial console via `aws ec2 get-console-output` if the agent never started).
 - **bench-down** runs hourly and destroys the stack when the instance is ≥ 41 h old, or finished/terminated early.
   Use *Run workflow* with `force = true` to stop immediately.
+  It removes `aws_cloudwatch_log_group.bench` from state before `terraform destroy`, so `/leb/bench` is not in the destroy plan (`lifecycle.prevent_destroy` remains on the resource).
+  bench-up exports `TF_VAR_results_bucket`, `TF_VAR_run_id`, and the other apply inputs once, before `terraform import` of that group. bench-results does not run Terraform.
 - **bench-results → Run workflow** (empty run id = latest) produces an artifact with `_analysis/*.csv`.
   Locally: `RESULTS_BUCKET=<prefix>-results ./experiments/fetch_results.sh [run_id]`.
 
