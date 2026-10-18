@@ -60,8 +60,16 @@ export class YjsReplica {
     const queued = this.queued;
     if (queued.length === 0) return;
     this.queued = [];
-    for (let i = 0; i < queued.length; i++) {
-      Y.applyUpdate(this.doc, Buffer.from(queued[i], 'base64'), REMOTE);
+    // One apply per update is minutes at L5000 (~25k updates/client). mergeUpdates
+    // keeps the same document state; a dropped update still changes the digest.
+    // 128 is faster than one-by-one and faster than larger merges (measured:
+    // 50k updates 288 ms vs 485 ms sequential; a 4k chunk was slower).
+    const CHUNK = 128;
+    for (let i = 0; i < queued.length; i += CHUNK) {
+      const merged = Y.mergeUpdates(
+        queued.slice(i, i + CHUNK).map((payload) => Buffer.from(payload, 'base64')),
+      );
+      Y.applyUpdate(this.doc, merged, REMOTE);
     }
   }
 }

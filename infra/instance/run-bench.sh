@@ -10,19 +10,20 @@ DEST="s3://${RESULTS_BUCKET}/runs/${RUN_ID}"
 cd "$REPO"
 mkdir -p results
 
-# Compose defaults pin CPUs 0-15 (16 vCPU). c7g.2xlarge has 8; a cpuset past nproc-1
+# Compose defaults pin CPUs 0-15 (16 vCPU, c7g.4xlarge). A cpuset past nproc-1
 # makes Docker refuse to start the container. Each gateway, Redis, and Kafka is pinned
 # off the loadgen cores. Shards = loadgen cores (at least 2): one Node process per core.
+# 16 vCPU: gateway1=0 gateway2=1 gateway3=2 redis=3-4 kafka=5-8 loadgen=9-15 (7 cores, 7 shards).
 # 8 vCPU: gateway1=0 gateway2=1 gateway3=2 redis=3 kafka=4 loadgen=5-7 (3 cores, 3 shards).
 ncpu="$(nproc)"
 if [ "$ncpu" -ge 16 ]; then
-  export CPUSET_GATEWAY1="${CPUSET_GATEWAY1:-0-1}"
-  export CPUSET_GATEWAY2="${CPUSET_GATEWAY2:-2-3}"
-  export CPUSET_GATEWAY3="${CPUSET_GATEWAY3:-4-5}"
-  export CPUSET_REDIS="${CPUSET_REDIS:-6-7}"
-  export CPUSET_KAFKA="${CPUSET_KAFKA:-8-9}"
-  export CPUSET_LOADGEN="${CPUSET_LOADGEN:-10-15}"
-  export LOADGEN_CPUS="${LOADGEN_CPUS:-6}"
+  export CPUSET_GATEWAY1="${CPUSET_GATEWAY1:-0}"
+  export CPUSET_GATEWAY2="${CPUSET_GATEWAY2:-1}"
+  export CPUSET_GATEWAY3="${CPUSET_GATEWAY3:-2}"
+  export CPUSET_REDIS="${CPUSET_REDIS:-3-4}"
+  export CPUSET_KAFKA="${CPUSET_KAFKA:-5-8}"
+  export CPUSET_LOADGEN="${CPUSET_LOADGEN:-9-15}"
+  export LOADGEN_CPUS="${LOADGEN_CPUS:-7}"
 elif [ "$ncpu" -ge 8 ]; then
   export CPUSET_GATEWAY1="${CPUSET_GATEWAY1:-0}"
   export CPUSET_GATEWAY2="${CPUSET_GATEWAY2:-1}"

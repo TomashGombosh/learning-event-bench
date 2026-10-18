@@ -43,25 +43,31 @@ describe('load generator building blocks', () => {
   it('flags generator lag and a missed offered rate as saturation', () => {
     const behind = assessLoad({
       offeredPerSec: 5000, achievedSendPerSec: 800, achievedDeliveryPerSec: 15000,
-      scheduleLagP50Ms: 90_000, serviceP50Ms: 40, disconnectsPerMin: 0,
+      scheduleLagP50Ms: 90_000, serviceP50Ms: 40,
     });
     expect(behind.saturated).toBe(true);
     expect(behind.saturationReason).toContain('schedule lag');
-    expect(behind.saturationReason).toContain('offered');
+    expect(behind.saturationReason).toContain('95%');
     const healthy = assessLoad({
       offeredPerSec: 200, achievedSendPerSec: 198, achievedDeliveryPerSec: 3700,
-      scheduleLagP50Ms: 4, serviceP50Ms: 12, disconnectsPerMin: 0,
+      scheduleLagP50Ms: 4, serviceP50Ms: 12,
     });
     expect(healthy.saturated).toBe(false);
     expect(healthy.saturationReason).toBeNull();
   });
 
-  it('does not treat fault-injected disconnects as a missed offered rate', () => {
+  it('marks achieved send under 95% of offered as saturated, including fault cells', () => {
     const faults = assessLoad({
       offeredPerSec: 5000, achievedSendPerSec: 1000, achievedDeliveryPerSec: 2000,
-      scheduleLagP50Ms: 8, serviceP50Ms: 20, disconnectsPerMin: 1,
+      scheduleLagP50Ms: 8, serviceP50Ms: 20,
     });
-    expect(faults.saturated).toBe(false);
+    expect(faults.saturated).toBe(true);
+    expect(faults.saturationReason).toContain('95%');
+    const keptUp = assessLoad({
+      offeredPerSec: 5000, achievedSendPerSec: 4800, achievedDeliveryPerSec: 4700,
+      scheduleLagP50Ms: 8, serviceP50Ms: 20,
+    });
+    expect(keptUp.saturated).toBe(false);
   });
 
   it('queued prebuilt updates converge and a missing update diverges', () => {
@@ -77,6 +83,17 @@ describe('load generator building blocks', () => {
     expect(pool.every((payload) => payload.length > 0)).toBe(true);
     expect(b.digest()).toBe(a.digest());
     expect(c.digest()).not.toBe(a.digest());
+  });
+
+  it('merged remote updates match sequential apply across the chunk boundary', () => {
+    const pool = new YjsReplica(seededRandom(12)).prebuild(600);
+    const merged = new YjsReplica(seededRandom(13));
+    const sequential = new YjsReplica(seededRandom(14));
+    pool.forEach((payload) => {
+      merged.queueRemote(payload);
+      sequential.applyRemote(payload);
+    });
+    expect(merged.digest()).toBe(sequential.digest());
   });
 
   it('one scheduler tick drives every client', async () => {

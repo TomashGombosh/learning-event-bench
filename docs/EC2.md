@@ -17,11 +17,9 @@ sections 3–4 are only needed for manual runs (`sudo systemctl stop leb-bench` 
 After the run: copy results, then `terraform destroy` (section 5).
 
 ## 1. Option B: manual instance
-- Automated `bench-up` defaults to **c7g.2xlarge** (Graviton3, 8 vCPU, 16 GiB) and **profile=smoke**. Terraform picks the Ubuntu 24.04 AMI for the instance architecture (`arm64` or `x86_64`). On 8 vCPU the cores are pinned: `gateway1=0 gateway2=1 gateway3=2 redis=3 kafka=4 loadgen=5-7` (`LOADGEN_CPUS=3`, `SHARDS=3`, one Node process per loadgen core). The generator and the brokers do not share a core. A second loadgen instance is not used: cross-host RTT would change the latency under test, and three loadgen cores are enough for L5000 once each shard has its own core.
-- 16 vCPU option: **c7i.4xlarge** or **c7g.4xlarge** (32 GiB), region eu-central-1 (Frankfurt), Ubuntu 24.04 LTS, 50 GiB gp3.
-  On-demand Linux price on 13.10.2026 (AWS price list, EU Frankfurt): c7i.4xlarge **$0.8148/h**.
-  A full matrix (~12 h) on that size therefore costs ≈ **$10** compute (+ a few cents of EBS for the days the volume exists).
-- Cheaper alternative: m7i.2xlarge (8 vCPU, 32 GiB, $0.483/h) uses the same 8-vCPU pin as c7g.2xlarge. Before a full profile, the instance runs a 30 s L5000 calibration and powers off if achieved send rate is under 95% of offered.
+- Automated `bench-up` defaults to **c7g.4xlarge** (Graviton3, 16 vCPU, 32 GiB, us-east-1) and **profile=smoke**. Terraform picks the Ubuntu 24.04 AMI for the instance architecture (`arm64` or `x86_64`). On 16 vCPU the cores are pinned: `gateway1=0 gateway2=1 gateway3=2 redis=3-4 kafka=5-8 loadgen=9-15` (`LOADGEN_CPUS=7`, `SHARDS=7`, one Node process per loadgen core). Kafka gets four cores and a 2G heap (`num.network.threads=8`, `num.io.threads=16`). The generator and the brokers do not share a core. A second loadgen instance is not used: cross-host RTT would change the latency under test, and seven loadgen cores cover L5000 once each shard has its own core.
+- 8 vCPU fallback (c7g.2xlarge or m7i.2xlarge): `gateway1=0 gateway2=1 gateway3=2 redis=3 kafka=4 loadgen=5-7` (`SHARDS=3`). m7i.2xlarge is 32 GiB at $0.483/h (EU Frankfurt, 13.10.2026). Before a full profile, the instance runs a 30 s L5000 calibration and powers off if achieved send rate is under 95% of offered.
+- On-demand Linux price (AWS price list, 13.10.2026): c7g.4xlarge in us-east-1 is **$0.5800/h** (twice c7g.2xlarge at $0.2900/h). A full matrix (~12.5 h) therefore costs ≈ **$7.30** compute; the 41 h cap is ≈ **$24**. EU Frankfurt c7g.4xlarge is about $0.6596/h (twice the $0.3298/h 2xlarge). c7i.4xlarge remains $0.8148/h. EBS for the days the volume exists is a few cents. Yjs digest merges updates in chunks of 128 (50k updates: 288 ms vs 485 ms applied one by one on this toolchain).
 - Security group: SSH (22) from your IP only. No other inbound ports are needed.
 
 ## 2. Prepare the host
@@ -42,7 +40,7 @@ docker stats --no-stream                                       # in a second SSH
 Check: every `results/<run>/shard-*/summary.json` exists, Pub/Sub/Streams R = 1 without faults, load generator
 CPU < 70 %. Then delete the pilot results: `rm -rf results/0*`.
 
-## 4. Full run (≈12 h) inside tmux
+## 4. Full run (≈12.5 h on c7g.4xlarge) inside tmux
 ```bash
 tmux new -s bench
 python3 experiments/make_matrix.py

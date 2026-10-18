@@ -5,10 +5,10 @@ on:
     inputs:
       instance_type:
         description: EC2 instance type
-        default: c7g.2xlarge
+        default: c7g.4xlarge
         type: string
       profile:
-        description: smoke = 6 cells, 60s. full = 128-cell matrix, about 12h. Default never starts the long run.
+        description: smoke = 6 cells, 60s. full = 128-cell matrix, about 12.5h. Default never starts the long run.
         type: choice
         options:
           - smoke
@@ -86,7 +86,7 @@ jobs:
 
       - name: Terraform apply
         env:
-          INSTANCE_TYPE: ${{ inputs.instance_type || 'c7g.2xlarge' }}
+          INSTANCE_TYPE: ${{ inputs.instance_type || 'c7g.4xlarge' }}
           PROFILE: ${{ inputs.profile || 'smoke' }}
           BENCH_REPS: ${{ inputs.bench_reps || '5' }}
           BENCH_DURATION_S: ${{ inputs.bench_duration_s || '240' }}
