@@ -160,7 +160,11 @@ if ! ./experiments/calibrate-loadgen.sh 2>&1 | tee -a results/run.log; then
 fi
 ./experiments/run_matrix.sh experiments/configs/matrix.csv 2>&1 | tee -a results/run.log
 matrix_rc=${PIPESTATUS[0]}
-if [ "$matrix_rc" -ne 0 ] || ! ls results/*/shard-*/summary.json >/dev/null 2>&1; then
+if [ "$matrix_rc" -ne 0 ]; then
+  echo "benchmark matrix failed (exit ${matrix_rc}); see CELLS_SUMMARY"
+  exit 1
+fi
+if ! ls results/*/shard-*/summary.json >/dev/null 2>&1; then
   echo "benchmark produced no cell results (matrix exit ${matrix_rc})"
   exit 1
 fi
@@ -170,7 +174,8 @@ STATUS=completed
 write_meta "$STATUS"
 cp experiments/configs/matrix.csv results/matrix.csv
 /opt/leb/sync-results.sh
-echo "{\"status\":\"${STATUS}\",\"finished_at\":\"$(date -Is)\",\"git_sha\":\"${GIT_SHA}\"}" > /tmp/DONE.json
+read -r CELL_EXECUTED CELL_EXPECTED CELL_FAILED <<< "$(python3 -c 'import json,pathlib; p=pathlib.Path("results/cells-summary.json"); d=json.loads(p.read_text()) if p.is_file() else {}; print(d.get("executed",0), d.get("expected",0), d.get("failed",0))')"
+echo "{\"status\":\"${STATUS}\",\"finished_at\":\"$(date -Is)\",\"git_sha\":\"${GIT_SHA}\",\"executed\":${CELL_EXECUTED},\"expected\":${CELL_EXPECTED},\"failed\":${CELL_FAILED}}" > /tmp/DONE.json
 aws s3 cp /tmp/DONE.json "${DEST}/DONE.json" --region "${AWS_REGION}"
 # Replace the 41 h safety shutdown. If logind rejects it, power off anyway.
 shutdown -c || true

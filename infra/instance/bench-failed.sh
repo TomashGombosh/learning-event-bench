@@ -15,7 +15,9 @@ fi
 if [ -n "${RESULTS_BUCKET:-}" ] && [ -n "${RUN_ID:-}" ] && command -v aws >/dev/null 2>&1; then
   region="${AWS_REGION:-us-east-1}"
   dest="s3://${RESULTS_BUCKET}/runs/${RUN_ID}"
-  echo "{\"status\":\"failed\",\"finished_at\":\"$(date -Is)\",\"git_sha\":\"${GIT_SHA:-}\"}" > /tmp/DONE.json
+  summary="/home/ubuntu/learning-event-bench/results/cells-summary.json"
+  read -r CELL_EXECUTED CELL_EXPECTED CELL_FAILED <<< "$(python3 -c 'import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); d=json.loads(p.read_text()) if p.is_file() else {}; print(d.get("executed",0), d.get("expected",0), d.get("failed",0))' "$summary")"
+  echo "{\"status\":\"failed\",\"finished_at\":\"$(date -Is)\",\"git_sha\":\"${GIT_SHA:-}\",\"executed\":${CELL_EXECUTED},\"expected\":${CELL_EXPECTED},\"failed\":${CELL_FAILED}}" > /tmp/DONE.json
   aws s3 cp /tmp/DONE.json "${dest}/DONE.json" --region "$region" || true
   if [ -f /var/log/leb/bench.log ]; then
     aws s3 cp /var/log/leb/bench.log "${dest}/logs/bench.log" --region "$region" || true

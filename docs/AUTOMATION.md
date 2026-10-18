@@ -76,7 +76,7 @@ and `ec2:GetConsoleOutput`. Streams are `{run_id}/leb-setup.log`, `{run_id}/clou
 Offered is the matrix load, not the sum of the shard files that happened to be written. The line
 ends with `SATURATED` when achieved send is under 95% of that load, a shard summary is missing
 (`shards=N/expected`), or a shard reports itself saturated. `FAILED` is on the same line when the
-cell did not finish. p50 and p99 are the worst shard; pooled percentiles stay in the analysis artifact. A setup failure also
+cell did not finish. The log ends with `CELLS_SUMMARY executed=N/expected=M failed=K`. Fewer executed rows than the matrix (the broker-reset `compose exec` used to eat the remaining CSV) is a failed run, and `DONE.json` carries the same counts. p50 and p99 are the worst shard; pooled percentiles stay in the analysis artifact. A setup failure also
 uploads `s3://<results>/runs/<run_id>/setup-failed.log`.
 
 ## 3. GitHub repository settings
