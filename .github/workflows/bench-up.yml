@@ -75,6 +75,42 @@ jobs:
             exit 1
           fi
 
+      - name: Export Terraform variables
+        env:
+          INSTANCE_TYPE: ${{ inputs.instance_type || 'c7g.4xlarge' }}
+          PROFILE: ${{ inputs.profile || 'smoke' }}
+          BENCH_REPS: ${{ inputs.bench_reps || '5' }}
+          BENCH_DURATION_S: ${{ inputs.bench_duration_s || '240' }}
+          RESULTS_BUCKET: ${{ vars.RESULTS_BUCKET }}
+          PERMISSIONS_BOUNDARY_ARN: ${{ vars.PERMISSIONS_BOUNDARY_ARN }}
+        run: |
+          # terraform import loads the whole configuration, so results_bucket and run_id
+          # are required even though the log group resource does not use them.
+          # One export feeds import, apply, and any later terraform command in this job.
+          RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA::7}"
+          if [ "$PROFILE" = "full" ]; then
+            REPS="$BENCH_REPS"
+            DURATION="$BENCH_DURATION_S"
+          else
+            PROFILE=smoke
+            REPS=1
+            DURATION=60
+          fi
+          {
+            echo "RUN_ID=${RUN_ID}"
+            echo "TF_VAR_region=${AWS_REGION}"
+            echo "TF_VAR_instance_type=${INSTANCE_TYPE}"
+            echo "TF_VAR_results_bucket=${RESULTS_BUCKET}"
+            echo "TF_VAR_permissions_boundary_arn=${PERMISSIONS_BOUNDARY_ARN}"
+            echo "TF_VAR_run_id=${RUN_ID}"
+            echo "TF_VAR_git_ref=${GITHUB_SHA}"
+            echo "TF_VAR_bench_profile=${PROFILE}"
+            echo "TF_VAR_bench_reps=${REPS}"
+            echo "TF_VAR_bench_duration_s=${DURATION}"
+            echo "TF_VAR_max_runtime_minutes=2460"
+          } >> "$GITHUB_ENV"
+          echo "profile=$PROFILE reps=$REPS duration_s=$DURATION run_id=$RUN_ID"
+
       - name: Import the persistent log group when it already exists
         run: |
           if aws logs describe-log-groups --log-group-name-prefix /leb/bench \
@@ -85,34 +121,7 @@ jobs:
           fi
 
       - name: Terraform apply
-        env:
-          INSTANCE_TYPE: ${{ inputs.instance_type || 'c7g.4xlarge' }}
-          PROFILE: ${{ inputs.profile || 'smoke' }}
-          BENCH_REPS: ${{ inputs.bench_reps || '5' }}
-          BENCH_DURATION_S: ${{ inputs.bench_duration_s || '240' }}
-        run: |
-          RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA::7}"
-          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
-          if [ "$PROFILE" = "full" ]; then
-            REPS="$BENCH_REPS"
-            DURATION="$BENCH_DURATION_S"
-          else
-            PROFILE=smoke
-            REPS=1
-            DURATION=60
-          fi
-          echo "profile=$PROFILE reps=$REPS duration_s=$DURATION"
-          terraform apply -input=false -auto-approve \
-            -var "region=${AWS_REGION}" \
-            -var "instance_type=${INSTANCE_TYPE}" \
-            -var "results_bucket=${{ vars.RESULTS_BUCKET }}" \
-            -var "permissions_boundary_arn=${{ vars.PERMISSIONS_BOUNDARY_ARN }}" \
-            -var "run_id=${RUN_ID}" \
-            -var "git_ref=${GITHUB_SHA}" \
-            -var "bench_profile=${PROFILE}" \
-            -var "bench_reps=${REPS}" \
-            -var "bench_duration_s=${DURATION}" \
-            -var "max_runtime_minutes=2460"
+        run: terraform apply -input=false -auto-approve
 
       - name: Summary
         run: |
