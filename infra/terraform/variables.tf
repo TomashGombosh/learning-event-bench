@@ -33,13 +33,24 @@ variable "git_ref" {
 }
 
 variable "bench_profile" {
-  description = "smoke = 17 cells x 60s (default, ~45-60 min). kafka-rerun = ~40 Kafka cells. full = factorial using bench_reps and bench_duration_s."
+  description = "smoke = 17 cells x 60s (default, ~45-60 min). kafka-rerun = ~40 Kafka cells. cells = only bench_cells. full = factorial using bench_reps and bench_duration_s."
   type        = string
   default     = "smoke"
 
   validation {
-    condition     = contains(["smoke", "kafka-rerun", "full"], var.bench_profile)
-    error_message = "bench_profile must be smoke, kafka-rerun, or full."
+    condition     = contains(["smoke", "kafka-rerun", "cells", "full"], var.bench_profile)
+    error_message = "bench_profile must be smoke, kafka-rerun, cells, or full."
+  }
+}
+
+variable "bench_cells" {
+  description = "bench_profile=cells only: comma separated run ids of an earlier matrix and/or presets from experiments/make_matrix.py (e.g. rerun-20261018-kafka)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = can(regex("^[0-9A-Za-z.,_-]*$", var.bench_cells))
+    error_message = "bench_cells may only contain run ids, preset names, and commas."
   }
 }
 

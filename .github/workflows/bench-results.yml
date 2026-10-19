@@ -7,6 +7,10 @@ on:
         description: Run id (folder under s3://<results-bucket>/runs/); empty = latest
         type: string
         default: ""
+      base_run_id:
+        description: Only for a profile=cells rerun. The earlier run whose cells it replaces (e.g. 20261018T110200Z-c440945); empty = analyse run_id alone
+        type: string
+        default: ""
 
 permissions:
   id-token: write
@@ -35,6 +39,7 @@ jobs:
         env:
           RESULTS_BUCKET: ${{ vars.RESULTS_BUCKET }}
           RUN_ID: ${{ inputs.run_id }}
+          BASE_RUN_ID: ${{ inputs.base_run_id }}
         run: |
           pip install -q -r analysis/requirements.txt
           ./experiments/fetch_results.sh "$RUN_ID"
@@ -47,6 +52,8 @@ jobs:
             results/run-metadata.json
             results/matrix.csv
             results/run.log
+            results/rerun-run.log
+            results/merged-from.json
             results/validity.json
             results/*/shard-*/summary.json
             results/*/gateways.log

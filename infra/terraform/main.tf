@@ -97,6 +97,7 @@ resource "aws_instance" "bench" {
     bench_reps          = var.bench_reps
     bench_duration_s    = var.bench_duration_s
     bench_profile       = var.bench_profile
+    bench_cells         = var.bench_cells
     max_runtime_minutes = var.max_runtime_minutes
     region              = var.region
   })

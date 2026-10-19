@@ -53,3 +53,43 @@ def test_full_factorial_includes_plain_kafka_and_l2500():
     assert "kafka" in brokers
     assert loads == {2500, 5000}
     assert all(r["broker"] != "kafka-acks" for r in rows)
+
+
+def test_cells_profile_keeps_the_original_run_ids():
+    import csv
+
+    original = Path(__file__).resolve().parent / "configs" / "matrix-20261018T110200Z-c440945.csv"
+    by_id = {r["run_id"]: r for r in csv.DictReader(original.open())}
+    rows = make_matrix.cells_rows("rerun-20261018-kafka")
+    assert len(rows) == 25
+    for item in rows:
+        old = by_id[item["run_id"]]
+        assert item["stage"] == old["stage"] and item["broker"] == old["broker"]
+        assert int(item["load"]) == int(old["load"]) and int(item["rooms"]) == int(old["rooms"])
+        assert float(item["disconnects_per_min"]) == float(old["disconnects_per_min"])
+        assert int(item["gateway_kill"]) == int(old["gateway_kill"]) and int(item["rep"]) == int(old["rep"])
+    expected = {i for i, r in by_id.items() if r["broker"] == "kafka-tuned" and r["load"] == "5000"}
+    assert {r["run_id"] for r in rows} == expected
+
+
+def test_cells_profile_accepts_ids_and_presets_and_dedupes():
+    spec = "009-C-streams-L5000-nu1-k0-r2, rerun-20261018-streams-c 009-C-streams-L5000-nu1-k0-r2"
+    rows = make_matrix.cells_rows(spec)
+    assert len(rows) == 20
+    assert all(r["broker"] == "streams" and r["stage"] == "C" for r in rows)
+
+
+def test_cells_profile_rejects_unknown_tokens():
+    import pytest
+
+    with pytest.raises(ValueError):
+        make_matrix.cells_rows("rerun-typo")
+    with pytest.raises(ValueError):
+        make_matrix.cells_rows("  ")
+
+
+def test_write_matrix_keeps_cell_ids(tmp_path):
+    rows = make_matrix.cells_rows("103-B-kafka-tuned-L5000-nu0-k0-r0")
+    out = tmp_path / "m.csv"
+    make_matrix.write_matrix(rows, str(out))
+    assert "103-B-kafka-tuned-L5000-nu0-k0-r0" in out.read_text()
