@@ -95,16 +95,29 @@ trap on_exit EXIT
 /opt/leb/sync-results.sh
 # shellcheck source=experiments/lib/budget.sh
 source "$REPO/experiments/lib/budget.sh"
-# Default is smoke. A dispatch that does not set BENCH_PROFILE=full must not start the 128-cell run.
+# Default is smoke. A dispatch that does not set BENCH_PROFILE=full must not start the long run.
+# kafka-rerun is the ~40 cell Kafka plan. full and kafka-rerun abort when the first cell of a
+# broker x scenario fails the validity gate (VALIDITY_FAIL_FAST=0 disables that).
 profile="${BENCH_PROFILE:-smoke}"
-if [ "$profile" = "full" ]; then
-  echo "profile=full: reps=${BENCH_REPS} duration=${BENCH_DURATION_S}s"
-else
-  profile=smoke
-  BENCH_DURATION_S=60
-  echo "profile=smoke: 6 cells, 60s measurement window"
-fi
+case "$profile" in
+  full)
+    echo "profile=full: reps=${BENCH_REPS} duration=${BENCH_DURATION_S}s fail-fast=on"
+    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
+    ;;
+  kafka-rerun)
+    echo "profile=kafka-rerun: ~40 Kafka cells duration=${BENCH_DURATION_S}s fail-fast=on"
+    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
+    ;;
+  *)
+    profile=smoke
+    BENCH_DURATION_S=60
+    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-0}"
+    echo "profile=smoke: 17 cells, 60s measurement window, fail-fast=off"
+    ;;
+esac
 export BENCH_PROFILE="$profile"
+export VALIDITY_FAIL_FAST
+export VALIDITY_CATCHUP_ERROR_MAX="${VALIDITY_CATCHUP_ERROR_MAX:-10}"
 write_meta running
 DURATION_S="${BENCH_DURATION_S}"
 apply_window_defaults "$DURATION_S"
@@ -132,11 +145,11 @@ if ! docker compose build gateway1; then
   echo "docker compose build failed"
   exit 1
 fi
-if [ "$profile" = "smoke" ]; then
-  (cd experiments && python3 make_matrix.py smoke)
-else
-  (cd experiments && python3 make_matrix.py "${BENCH_REPS}")
-fi
+case "$profile" in
+  smoke) (cd experiments && python3 make_matrix.py smoke) ;;
+  kafka-rerun) (cd experiments && python3 make_matrix.py kafka-rerun) ;;
+  *) (cd experiments && python3 make_matrix.py "${BENCH_REPS}") ;;
+esac
 cells="$(tail -n +2 experiments/configs/matrix.csv | grep -c . || true)"
 # One cell may spend the compose-up budget plus the loadgen timeout. The watchdog
 # is that wall time times the matrix, plus a few minutes to upload. It calls the
@@ -160,6 +173,27 @@ if ! ./experiments/calibrate-loadgen.sh 2>&1 | tee -a results/run.log; then
 fi
 ./experiments/run_matrix.sh experiments/configs/matrix.csv 2>&1 | tee -a results/run.log
 matrix_rc=${PIPESTATUS[0]}
+if [ "$matrix_rc" -eq 42 ]; then
+  STATUS=aborted_invalid
+  REASON="$(python3 -c 'import json,pathlib; p=pathlib.Path("results/validity.json"); d=json.loads(p.read_text()) if p.is_file() else {}; print(d.get("reason") or "validity gate failed")')"
+  echo "benchmark aborted: ${REASON}"
+  write_meta "$STATUS"
+  cp experiments/configs/matrix.csv results/matrix.csv
+  /opt/leb/sync-results.sh || true
+  python3 - "$STATUS" "$REASON" "$GIT_SHA" "$(date -Is)" <<'PY' > /tmp/DONE.json
+import json, sys
+print(json.dumps({
+    "status": sys.argv[1], "reason": sys.argv[2], "git_sha": sys.argv[3], "finished_at": sys.argv[4],
+}))
+PY
+  aws s3 cp /tmp/DONE.json "${DEST}/DONE.json" --region "${AWS_REGION}" || true
+  shutdown -c || true
+  if ! shutdown -h +5 "benchmark aborted (${STATUS}); terminating in 5 minutes"; then
+    sleep 5
+    systemctl poweroff --force || poweroff -f || true
+  fi
+  exit 0
+fi
 if [ "$matrix_rc" -ne 0 ]; then
   echo "benchmark matrix failed (exit ${matrix_rc}); see CELLS_SUMMARY"
   exit 1

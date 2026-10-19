@@ -51,9 +51,12 @@ cell_complete() {
 
 # One grep-able line per cell. Offered is the matrix load, not the sum of whichever
 # shard files happened to land: a timed-out shard used to shrink offered (3300, 800).
-# SATURATED when any shard says so, achieved < 95% of nominal, or a shard file is missing.
+# The rate next to offered is attempted sends (sent + skipped while offline) per second.
+# SATURATED when any shard says so, attempted < 95% of nominal, or a shard file is missing.
+# CLIENTS_OFFLINE, DIVERGED and CENSORED are separate: a fault cell is not "saturated"
+# just because clients skipped a slot, and a short delivery ratio is not a latency sample.
 emit_cell_summary() {
-  python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY' || echo "CELL $1 broker=$2 offered/achieved=$3/0.0 FAILED SATURATED"
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY' || echo "CELL $1 broker=$2 offered/attempted=$3/0.0 FAILED SATURATED"
 import json, sys
 from pathlib import Path
 run_id, broker, nominal_s, shards_s, rooms_s, failed_s = sys.argv[1:7]
@@ -67,28 +70,52 @@ if not paths:
     flags.append("SATURATED")
     flags.append(f"shards=0/{expected}")
     print(
-        f"CELL {run_id} broker={broker} offered/achieved={nominal:.1f}/0.0 "
+        f"CELL {run_id} broker={broker} offered/attempted={nominal:.1f}/0.0 "
+        f"delivery_ratio=0.000 offline_frac=0.000 "
         f"p50=0.0 p99=0.0 rooms_diverged=0 clients_lost=0 clients_not_converged=0 "
         + " ".join(flags)
     )
     raise SystemExit(0)
 summaries = [json.loads(path.read_text()) for path in paths]
-achieved = sum(float(s["load"]["achievedSendPerSec"]) for s in summaries)
+
+def window_s(summary):
+    cfg = summary.get("config") or {}
+    return max(0.001, float(cfg.get("WARMUP_S", 0)) + float(cfg.get("DURATION_S", 0)))
+
+attempted = sent = skipped = 0.0
+ratios = []
+for summary in summaries:
+    counters = summary.get("counters") or {}
+    sent += float(counters.get("sent", 0))
+    skipped += float(counters.get("skippedWhileOffline", 0))
+    attempted += (float(counters.get("sent", 0)) + float(counters.get("skippedWhileOffline", 0))) / window_s(summary)
+    delivery = summary.get("delivery") or {}
+    if "ratio" in delivery:
+        ratios.append(float(delivery["ratio"]))
 p50 = max(float(s["latency"]["p50Ms"] or 0) for s in summaries)
 p99 = max(float(s["latency"]["p99Ms"] or 0) for s in summaries)
 rooms_diverged = sum(int(s.get("divergedRooms", 0)) for s in summaries)
 clients_lost = sum(int(s.get("clientsLost", 0)) for s in summaries)
 clients_not_converged = sum(int(s.get("clientsNotConverged", 0)) for s in summaries)
 missing = len(paths) < expected
-short = nominal > 0 and achieved < 0.95 * nominal
+offline_frac = skipped / (sent + skipped) if (sent + skipped) else 0.0
+delivery_ratio = min(ratios) if ratios else 0.0
+short = nominal > 0 and attempted < 0.95 * nominal
 saturated = any(bool(s.get("load", {}).get("saturated")) for s in summaries) or missing or short
 if saturated and "SATURATED" not in flags:
     flags.append("SATURATED")
+if offline_frac > 0.05:
+    flags.append("CLIENTS_OFFLINE")
+if rooms_diverged > 0:
+    flags.append("DIVERGED")
+if ratios and delivery_ratio < 0.99:
+    flags.append("CENSORED")
 if missing:
     flags.append(f"shards={len(paths)}/{expected}")
 suffix = (" " + " ".join(flags)) if flags else ""
 print(
-    f"CELL {run_id} broker={broker} offered/achieved={nominal:.1f}/{achieved:.1f} "
+    f"CELL {run_id} broker={broker} offered/attempted={nominal:.1f}/{attempted:.1f} "
+    f"delivery_ratio={delivery_ratio:.3f} offline_frac={offline_frac:.3f} "
     f"p50={p50:.1f} p99={p99:.1f} rooms_diverged={rooms_diverged} "
     f"clients_lost={clients_lost} clients_not_converged={clients_not_converged}{suffix}"
 )
@@ -162,6 +189,7 @@ prepare_brokers() {
 executed=0
 failed_cells=()
 expected_cells=0
+VALIDITY_CATCHUP_ERROR_MAX="${VALIDITY_CATCHUP_ERROR_MAX:-10}"
 report_cells() {
   echo "CELLS_SUMMARY executed=${executed}/expected=${expected_cells} failed=${#failed_cells[@]}"
   mkdir -p results
@@ -171,7 +199,15 @@ report_cells() {
 cleanup() {
   local rc=$?
   report_cells || true
+  if [ "$rc" -eq 42 ]; then
+    python3 experiments/validate_cells.py --summary --aborted --results results || true
+  else
+    python3 experiments/validate_cells.py --summary --results results || true
+  fi
   docker compose down -v --remove-orphans </dev/null >/dev/null 2>&1 || true
+  if [ "$rc" -eq 42 ]; then
+    exit 42
+  fi
   if [ "$rc" -eq 0 ]; then
     if [ "$executed" -lt "$expected_cells" ]; then
       echo "matrix stopped early: executed ${executed} of ${expected_cells} rows" >&2
@@ -273,6 +309,20 @@ while IFS=, read -r stage broker load rooms clients rate nu kill rep run_id <&3;
   fi
   docker compose logs --no-color gateway1 gateway2 gateway3 </dev/null > "results/$run_id/gateways.log" 2>&1 || true
   emit_cell_summary "$run_id" "$broker" "$load" "$SHARDS" "$rooms" "$shard_failed"
+  fail_fast_args=()
+  if [ "${VALIDITY_FAIL_FAST:-0}" = "1" ]; then
+    fail_fast_args=(--fail-fast)
+  fi
+  gate_rc=0
+  python3 experiments/validate_cells.py --cell --results results \
+    --run-id "$run_id" --stage "$stage" --broker "$broker" --load "$load" \
+    --nu "$nu" --kill "$kill" --rooms "$rooms" --clients "$clients" --shards "$SHARDS" \
+    --catchup-max "$VALIDITY_CATCHUP_ERROR_MAX" \
+    "${fail_fast_args[@]}" || gate_rc=$?
+  if [ "$gate_rc" -eq 42 ]; then
+    echo "validity gate aborted the matrix at $run_id (broker=$broker stage=$stage)"
+    exit 42
+  fi
   if [ "$shard_failed" -ne 0 ] || ! ls "results/$run_id"/shard-*/summary.json >/dev/null 2>&1; then
     if ls "results/$run_id"/shard-*/summary.json >/dev/null 2>&1; then
       echo "cell $run_id failed (shard_failed=$shard_failed)" | tee -a "results/$run_id/cell-failed.txt" >&2

@@ -91,7 +91,7 @@ uploads `s3://<results>/runs/<run_id>/setup-failed.log`.
 The repository must be public (the instance clones it anonymously at the exact commit of the workflow run).
 
 ## 4. Run
-- **Actions → bench-up → Run workflow**. `profile` defaults to **smoke** (6 cells, 60 s). Choose `full` for the factorial (`bench_reps=5` is 128 cells, ~12.5 h on c7g.4xlarge). A default dispatch does not start that run. The 240 s measurement window is unchanged (warmup 30 + drain 15 → 285 s inside the loadgen). After the first cell, Redis and Kafka stay up and only the gateways are recreated, so overhead is about a minute (prebuild, connect, digest, topic delete). Keep a full run below 40 h.
+- **Actions → bench-up → Run workflow**. `profile` defaults to **smoke** (17 cells, 60 s, about 45–60 min). Then `kafka-rerun` (~40 Kafka cells, 240 s, about 4–5 h), then `full` (factorial with plain kafka in scenario C and C at L2500 as well as L5000; `bench_reps=5` is about 23 h). A default dispatch does not start the long run. Check `VALIDITY_SUMMARY` in CloudWatch `/leb/bench` stream `<run_id>/bench.log` (and `results/validity.json`) before the next profile. `full` and `kafka-rerun` abort when the first cell of a broker × scenario fails the gate, write `DONE.json` with `status=aborted_invalid`, and shut down. The 240 s measurement window is unchanged for those two profiles (warmup 30 + drain 15 → 285 s inside the loadgen). After the first cell, Redis and Kafka stay up and only the gateways are recreated, so overhead is about a minute (prebuild, connect, digest, topic delete). Keep a full run below 40 h.
   A stuck cell is killed after `(warmup + duration + drain) × 3 + 60 s`. A watchdog of `cells × (compose-up budget + that timeout)` uploads logs to S3 and powers the instance off.
 - Progress: `aws s3 ls s3://<prefix>-results/runs/<run_id>/results/` or the `logs/` folder.
   Live setup output is also in CloudWatch log group `/leb/bench`, stream `<run_id>/leb-setup.log`
@@ -112,7 +112,7 @@ The repository must be public (the instance clones it anonymously at the exact c
 5. Deploy policy denies other instance types. Recommended extra: an AWS Budget with an e-mail alert (e.g. $30/month).
 
 ## Cost (on-demand Linux, AWS price list 13.10.2026)
-Default is c7g.4xlarge (Graviton3, 16 vCPU / 32 GiB). us-east-1 (the `AWS_REGION` example) is $0.5800/h → full profile ~12.5 h ≈ $7.30, 41 h cap ≈ $24.
+Default is c7g.4xlarge (Graviton3, 16 vCPU / 32 GiB). us-east-1 (the `AWS_REGION` example) is $0.5800/h → full profile ~23 h ≈ $13.30, 41 h cap ≈ $24.
 EU Frankfurt c7g.4xlarge is $0.6596/h (twice c7g.2xlarge at $0.3298/h) → 12.5 h ≈ $8.20, 41 h ≈ $27.
 c7g.2xlarge us-east-1 is $0.2900/h if you override the instance type (8 vCPU pin, Kafka on one core). c7i.4xlarge $0.8148/h → 12 h ≈ $9.8, 41 h ≈ $33.4. m7i.2xlarge $0.483/h → 41 h ≈ $19.8.
 S3 storage for results (tens of MB) and state is negligible; GitHub Actions minutes for hourly checks are about 1 min each.

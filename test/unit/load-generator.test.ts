@@ -1,4 +1,6 @@
+import { latencyOf } from '@domain/latency';
 import { ConnectGate, initialFailover, noteFailure, pickGateway } from '../../apps/load-generator/gateway-failover';
+import { LatencyRecorder } from '../../apps/load-generator/latency-recorder';
 import { assessLoad } from '../../apps/load-generator/load-report';
 import { PoissonSchedule } from '../../apps/load-generator/poisson-schedule';
 import { exponentialSeconds, seededRandom } from '../../apps/load-generator/random';
@@ -56,18 +58,26 @@ describe('load generator building blocks', () => {
     expect(healthy.saturationReason).toBeNull();
   });
 
-  it('marks achieved send under 95% of offered as saturated, including fault cells', () => {
+  it('counts offline skips as attempted sends, not as saturation', () => {
     const faults = assessLoad({
-      offeredPerSec: 5000, achievedSendPerSec: 1000, achievedDeliveryPerSec: 2000,
+      offeredPerSec: 5000, achievedSendPerSec: 1000, attemptedPerSec: 4900, achievedDeliveryPerSec: 2000,
       scheduleLagP50Ms: 8, serviceP50Ms: 20,
     });
-    expect(faults.saturated).toBe(true);
-    expect(faults.saturationReason).toContain('95%');
+    expect(faults.saturated).toBe(false);
+    expect(faults.clientsOffline).toBe(true);
+    expect(faults.offlineFraction).toBeGreaterThan(0.05);
+    const stillShort = assessLoad({
+      offeredPerSec: 5000, achievedSendPerSec: 1000, attemptedPerSec: 4000, achievedDeliveryPerSec: 2000,
+      scheduleLagP50Ms: 8, serviceP50Ms: 20,
+    });
+    expect(stillShort.saturated).toBe(true);
+    expect(stillShort.saturationReason).toContain('attempted');
     const keptUp = assessLoad({
       offeredPerSec: 5000, achievedSendPerSec: 4800, achievedDeliveryPerSec: 4700,
       scheduleLagP50Ms: 8, serviceP50Ms: 20,
     });
     expect(keptUp.saturated).toBe(false);
+    expect(keptUp.clientsOffline).toBe(false);
   });
 
   it('queued prebuilt updates converge and a missing update diverges', () => {
@@ -156,5 +166,17 @@ describe('load generator building blocks', () => {
     const updates = Array.from({ length: 10 }, () => a.editRandomly());
     [...updates].reverse().concat(updates).forEach((u) => b.applyRemote(u));
     expect(b.digest()).toBe(a.digest());
+  });
+
+  it('keeps replacing reservoir samples after the cap (Algorithm R)', () => {
+    const recorder = new LatencyRecorder(() => 0, 2);
+    for (let i = 1; i <= 5; i++) {
+      expect(recorder.shouldCapture()).toBe(true);
+      recorder.recordServiceUs(i * 1000, latencyOf('r', i * 1000, i * 1000 + 10, undefined, i * 1000));
+    }
+    const summary = recorder.summary();
+    expect(summary.count).toBe(5);
+    expect(summary.reservoirMaxScheduledMs).toBe(5000);
+    expect(summary.reservoirMinScheduledMs).toBe(2000);
   });
 });
