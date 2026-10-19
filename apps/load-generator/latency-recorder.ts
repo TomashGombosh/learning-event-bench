@@ -23,20 +23,41 @@ export class LatencyRecorder {
   private seen = 0;
   private lagSeen = 0;
   private clockSkew = 0;
+  /** Slot chosen by the last shouldCapture() call. -1 means this delivery is histogram-only. */
+  private pendingSlot = -1;
 
   constructor(private readonly random: Random, private readonly reservoirSize: number) {}
 
-  /** True for 1/32 of deliveries. The hot path records only the histogram. */
+  /**
+   * Algorithm R over the whole window. The first `reservoirSize` deliveries fill the
+   * reservoir; every later delivery replaces a slot with probability size/n.
+   * Stopping once the reservoir was full biased L5000 toward the start of the window.
+   */
   shouldCapture(): boolean {
-    return (this.seen & 31) === 0 && this.reservoir.length < this.reservoirSize;
+    const n = this.seen + 1;
+    if (this.reservoir.length < this.reservoirSize) {
+      this.pendingSlot = this.reservoir.length;
+      return true;
+    }
+    const slot = Math.floor(this.random() * n);
+    if (slot < this.reservoirSize) {
+      this.pendingSlot = slot;
+      return true;
+    }
+    this.pendingSlot = -1;
+    return false;
   }
 
-  /** Hot path: HDR histogram only. `sample` is set for the reservoir subsample. */
+  /** Hot path: HDR histogram always. `sample` is set only when shouldCapture() was true. */
   recordServiceUs(serviceUs: number, sample?: LatencySample): void {
     if (serviceUs < 0) this.clockSkew++;
     else this.service.recordValue(Math.max(1, Math.round(serviceUs)));
     this.seen++;
-    if (sample !== undefined && this.reservoir.length < this.reservoirSize) this.reservoir.push(sample);
+    if (sample !== undefined && this.pendingSlot >= 0 && this.pendingSlot <= this.reservoir.length) {
+      if (this.pendingSlot === this.reservoir.length) this.reservoir.push(sample);
+      else this.reservoir[this.pendingSlot] = sample;
+    }
+    this.pendingSlot = -1;
   }
 
   /** Service latency of one delivered remote event (send -> receive). */
@@ -70,6 +91,8 @@ export class LatencyRecorder {
       scheduleLagCount: this.lagSeen,
       scheduleLagP50Ms: this.percentile(this.lag, 50, this.lagSeen),
       scheduleLagP99Ms: this.percentile(this.lag, 99, this.lagSeen),
+      reservoirMinScheduledMs: this.reservoirSpan().min,
+      reservoirMaxScheduledMs: this.reservoirSpan().max,
     };
     for (const p of PERCENTILES) result[`p${p}Ms`] = this.percentile(this.service, p, this.seen);
     return result;
@@ -91,12 +114,25 @@ export class LatencyRecorder {
         s.scheduleLagMs?.toFixed(3) ?? '',
         s.uplinkMs?.toFixed(3) ?? '',
         s.downlinkMs?.toFixed(3) ?? '',
+        s.scheduledAtMs?.toFixed(3) ?? '',
       ].join(',');
     });
     writeFileSync(
       join(directory, 'latency_samples.csv'),
-      'room,total_ms,service_ms,schedule_lag_ms,uplink_ms,downlink_ms\n' + rows.join('\n') + '\n',
+      'room,total_ms,service_ms,schedule_lag_ms,uplink_ms,downlink_ms,scheduled_at_ms\n' + rows.join('\n') + '\n',
     );
+  }
+
+  private reservoirSpan(): { min: number; max: number } {
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    for (const sample of this.reservoir) {
+      if (sample.scheduledAtMs === undefined) continue;
+      if (sample.scheduledAtMs < min) min = sample.scheduledAtMs;
+      if (sample.scheduledAtMs > max) max = sample.scheduledAtMs;
+    }
+    if (!Number.isFinite(min)) return { min: 0, max: 0 };
+    return { min, max };
   }
 
   private percentile(histogram: { getValueAtPercentile(p: number): number }, percentile: number, count: number): number {

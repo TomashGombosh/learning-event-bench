@@ -5,7 +5,7 @@ import { KafkaEventBus } from './kafka/kafka-event-bus';
 import { RedisPubSubEventBus } from './redis-pubsub/redis-pubsub-event-bus';
 import { RedisStreamsEventBus } from './redis-streams/redis-streams-event-bus';
 
-export type BrokerKind = 'memory' | 'pubsub' | 'streams' | 'kafka' | 'kafka-tuned';
+export type BrokerKind = 'memory' | 'pubsub' | 'streams' | 'kafka' | 'kafka-tuned' | 'kafka-acks';
 
 export interface BrokerBundle {
   readonly bus: EventBusPort;
@@ -33,14 +33,18 @@ export async function createBroker(kind: BrokerKind, env: BrokerEnv): Promise<Br
       return { bus, log: bus };
     }
     case 'kafka':
-    case 'kafka-tuned': {
+    case 'kafka-tuned':
+    case 'kafka-acks': {
+      // kafka: acks=all, idempotent. kafka-tuned: acks=1, not idempotent.
+      // kafka-acks: acks=all, not idempotent (separates idempotence from the ack).
       const tuned = kind === 'kafka-tuned';
       const bus = new KafkaEventBus({
         brokers: env.kafkaBrokers,
         topic: 'collab-events',
         partitions: env.kafkaPartitions,
         acks: tuned ? 1 : -1,
-        idempotent: !tuned,
+        idempotent: kind === 'kafka',
+        catchUpBuffer: env.streamMaxLen > 0 ? env.streamMaxLen : 10_000,
       });
       await bus.start();
       return { bus, log: bus };

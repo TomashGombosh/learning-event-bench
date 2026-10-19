@@ -50,7 +50,9 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const random = seededRandom(config.SEED + config.SHARD_INDEX);
   const gateways = config.GATEWAY_URLS.split(',');
-  const counters: ClientCounters = { sent: 0, received: 0, skippedWhileOffline: 0, catchUpEvents: 0, catchUpUnsupported: 0 };
+  const counters: ClientCounters = {
+    sent: 0, received: 0, sentInWindow: 0, skippedWhileOffline: 0, catchUpEvents: 0, catchUpUnsupported: 0,
+  };
   const recorder = new LatencyRecorder(random, config.RESERVOIR);
   let injector: DisconnectInjector | null = null;
   process.on('SIGTERM', () => {
@@ -95,9 +97,14 @@ async function main(): Promise<void> {
     const clientsNotConverged = rooms.reduce((sum, room) => sum + room.notConvergedClients, 0);
     const latency = recorder.summary();
     const generationS = Math.max(0.001, config.WARMUP_S + config.DURATION_S);
+    const attempted = counters.sent + counters.skippedWhileOffline;
+    const expectedDeliveries = counters.sentInWindow * Math.max(0, config.CLIENTS_PER_ROOM - 1);
+    const observedDeliveries = recorder.count;
+    const deliveryRatio = expectedDeliveries === 0 ? 1 : observedDeliveries / expectedDeliveries;
     const load = assessLoad({
       offeredPerSec: shardRooms * config.CLIENTS_PER_ROOM * config.RATE_PER_CLIENT,
       achievedSendPerSec: counters.sent / generationS,
+      attemptedPerSec: attempted / generationS,
       achievedDeliveryPerSec: counters.received / generationS,
       scheduleLagP50Ms: latency.scheduleLagP50Ms ?? 0,
       serviceP50Ms: latency.p50Ms ?? 0,
@@ -111,6 +118,15 @@ async function main(): Promise<void> {
       counters: { ...counters, disconnectsInjected: injector?.injected ?? 0 },
       latency,
       load,
+      clientsExpected: clients.length,
+      clientsConnected: online,
+      delivery: {
+        sentInWindow: counters.sentInWindow,
+        expected: expectedDeliveries,
+        observed: observedDeliveries,
+        ratio: deliveryRatio,
+        censored: deliveryRatio < 0.99,
+      },
       rooms: rooms.length,
       divergedRooms: rooms.filter((r) => r.diverged).length,
       clientsLost,

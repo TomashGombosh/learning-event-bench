@@ -13,6 +13,50 @@ export interface KafkaOptions {
   /** acks=1 (latency-tuned) or -1 (all ISR, default durable). */
   readonly acks: 1 | -1;
   readonly idempotent: boolean;
+  /** Per-room catch-up ring. Recent reconnects read this instead of joining a consumer group. */
+  readonly catchUpBuffer?: number;
+}
+
+/**
+ * Events the live consumer has already applied, capped per room.
+ * Catch-up of a recent offset is a slice of this ring. A new consumer group is only
+ * opened when the requested offset has already fallen out of the ring, or the live
+ * consumer has not yet reached the partition high watermark.
+ */
+export class RoomReplayBuffer {
+  private readonly rooms = new Map<string, StoredEvent[]>();
+  /** Highest offset the live consumer has applied, per partition. */
+  private readonly caughtUp = new Map<number, bigint>();
+
+  constructor(private readonly capacity: number) {}
+
+  push(stored: StoredEvent): void {
+    const { partition, offset } = parseKafkaEventId(stored.id);
+    const prev = this.caughtUp.get(partition);
+    if (prev === undefined || offset > prev) this.caughtUp.set(partition, offset);
+    let ring = this.rooms.get(stored.event.roomId);
+    if (!ring) {
+      ring = [];
+      this.rooms.set(stored.event.roomId, ring);
+    }
+    ring.push(stored);
+    if (ring.length > this.capacity) ring.splice(0, ring.length - this.capacity);
+  }
+
+  /**
+   * Room events with offset >= `from` when the ring still holds `from` and the live
+   * consumer has reached `high - 1`. Null means the caller should read the log.
+   */
+  slice(roomId: string, partition: number, from: bigint, high: bigint, limit?: number): StoredEvent[] | null {
+    const caught = this.caughtUp.get(partition);
+    if (caught === undefined || caught < high - 1n) return null;
+    const ring = this.rooms.get(roomId);
+    if (!ring || ring.length === 0) return this.capacity > 0 ? [] : null;
+    const oldest = parseKafkaEventId(ring[0].id).offset;
+    if (from < oldest) return null;
+    const missed = ring.filter((stored) => parseKafkaEventId(stored.id).offset >= from);
+    return limit === undefined ? missed : missed.slice(0, limit);
+  }
 }
 
 /**
@@ -28,6 +72,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
   private readonly handlers = new Map<string, Set<EventHandler>>();
   /** Actual partition count of the topic (may differ from the requested one if it pre-exists). */
   private partitions: number;
+  private readonly replay: RoomReplayBuffer;
 
   constructor(private readonly options: KafkaOptions) {
     this.kafka = new Kafka({
@@ -52,6 +97,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     });
     this.admin = this.kafka.admin();
     this.partitions = options.partitions;
+    this.replay = new RoomReplayBuffer(options.catchUpBuffer ?? 10_000);
   }
 
   /** Must be awaited before use (topic creation + group join take seconds). */
@@ -72,6 +118,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
           if (message.value) {
             const event = decodeEvent(message.value.toString());
             const stored = { id: kafkaEventId(batch.partition, message.offset), event };
+            this.replay.push(stored);
             this.handlers.get(event.roomId)?.forEach((handle) => handle(stored));
           }
           if (i > 0 && i % 100 === 0) await heartbeat();
@@ -98,7 +145,10 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     return { unsubscribe: async () => void this.handlers.get(roomId)?.delete(handler) };
   }
 
-  /** Replays a room partition with a short-lived consumer (slow: includes a group join). */
+  /**
+   * Recent catch-up is a slice of the live consumer's ring (no extra group join).
+   * `consumeRange` runs only when that ring does not cover the requested offset.
+   */
   async readAfter(roomId: string, lastId: EventId | null, limit?: number): Promise<StoredEvent[]> {
     const partition = partitionOf(roomId, this.partitions);
     const startOffset = lastId === null ? null : parseKafkaEventId(lastId).offset + 1n;
@@ -107,6 +157,8 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     const low = BigInt(offsets.find((o) => o.partition === partition)!.low);
     const from = startOffset ?? low;
     if (from >= high) return [];
+    const buffered = this.replay.slice(roomId, partition, from, high, limit);
+    if (buffered !== null) return buffered;
     return this.consumeRange(roomId, partition, from, high, limit);
   }
 
@@ -114,6 +166,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     await Promise.allSettled([this.consumer.disconnect(), this.producer.disconnect(), this.admin.disconnect()]);
   }
 
+  /** Fallback when the ring does not cover `from`. One short-lived group per call. */
   private async consumeRange(
     roomId: string, partition: number, from: bigint, high: bigint, limit?: number,
   ): Promise<StoredEvent[]> {

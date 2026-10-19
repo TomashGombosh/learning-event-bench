@@ -47,4 +47,7 @@ jobs:
             results/run-metadata.json
             results/matrix.csv
             results/run.log
+            results/validity.json
+            results/*/shard-*/summary.json
+            results/*/gateways.log
           if-no-files-found: warn

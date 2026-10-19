@@ -13,6 +13,8 @@ import { YjsReplica } from './yjs-replica';
 export interface ClientCounters {
   sent: number;
   received: number;
+  /** Sends whose scheduled time falls inside the measurement window (excludes warmup). */
+  sentInWindow: number;
   skippedWhileOffline: number;
   catchUpEvents: number;
   catchUpUnsupported: number;
@@ -212,6 +214,7 @@ export class SimulatedClient {
     this.unacknowledged.set(event.seq, event);
     this.emitWithOutbox(event);
     this.counters.sent++;
+    if (scheduledAtMs >= this.window.fromMs && scheduledAtMs < this.window.toMs) this.counters.sentInWindow++;
   }
 
   private emitWithOutbox(event: CollabEvent): void {

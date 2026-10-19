@@ -35,14 +35,35 @@ def load_runs(results: Path, matrix: Path) -> tuple[pd.DataFrame, dict[str, np.n
         summaries = [json.loads(s.read_text()) for s in shards]
         counters = [s["counters"] for s in summaries]
         saturated = any(bool(s.get("load", {}).get("saturated")) for s in summaries)
-        runs.append(dict({k: v for k, v in row._asdict().items() if k != "Index"}, n_samples=len(lat), p50=np.percentile(lat, 50), p95=np.percentile(lat, 95),
-                         p99=np.percentile(lat, 99), mean=lat.mean(), rooms_total=len(rm),
+        # HDR percentiles see every delivery. The reservoir is a sample and used to be
+        # only the start of an L5000 window, so the run-level numbers follow the HDR.
+        def hdr(key: str) -> float:
+            return max(float((s.get("latency") or {}).get(key) or 0) for s in summaries)
+        ratios = [float(s["delivery"]["ratio"]) for s in summaries if isinstance(s.get("delivery"), dict) and "ratio" in s["delivery"]]
+        delivery_ratio = min(ratios) if ratios else np.nan
+        censored = bool(ratios) and delivery_ratio < 0.99
+        runs.append(dict({k: v for k, v in row._asdict().items() if k != "Index"}, n_samples=len(lat),
+                         p50=hdr("p50Ms"), p95=hdr("p95Ms"), p99=hdr("p99Ms"), mean=hdr("meanMs"),
+                         rooms_total=len(rm),
                          rooms_diverged=int(rm["diverged"].sum()),
                          clients_lost=sum(int(s.get("clientsLost", 0)) for s in summaries),
                          clients_not_converged=sum(int(s.get("clientsNotConverged", 0)) for s in summaries),
                          sent=sum(c["sent"] for c in counters),
-                         saturated=saturated))
+                         saturated=saturated, delivery_ratio=delivery_ratio, censored=censored))
     return pd.DataFrame(runs), samples, pd.concat(rooms) if rooms else pd.DataFrame()
+
+
+def _bootstrap_median(values: np.ndarray) -> tuple[float, float, float]:
+    """95% CI of the median, resampling runs. One run has no width."""
+    point = float(np.median(values))
+    if len(values) < 2:
+        return point, point, point
+    stats_ = []
+    for _ in range(min(B, 2000)):
+        pick = values[RNG.integers(0, len(values), len(values))]
+        stats_.append(float(np.median(pick)))
+    lo, hi = np.percentile(stats_, [2.5, 97.5])
+    return point, float(lo), float(hi)
 
 
 def cluster_bootstrap_quantile(run_ids: list[str], samples: dict[str, np.ndarray], q: float) -> tuple[float, float, float]:
@@ -88,6 +109,57 @@ def tost_two_proportions(k1: int, n1: int, k2: int, n2: int, margin: float) -> f
     return max(1 - stats.norm.cdf((d + margin) / se), stats.norm.cdf((d - margin) / se))
 
 
+def fit_latency_curve(means: pd.Series) -> dict:
+    """H4: E[T](L) = T0 + 1000/(mu - L). Needs >= 3 load levels and an interior fit.
+
+    With four or more levels the highest load is held out. With exactly three, the fit is
+    in-sample: holding one out would leave two points, which is what pinned mu on the bound.
+    """
+    means = means.sort_index()
+    if len(means) < 3:
+        return {"valid": False, "reason": f"need >= 3 load levels, have {len(means)}", "levels": int(len(means))}
+    held_out = len(means) >= 4
+    train = means.iloc[:-1] if held_out else means
+    test_load = float(means.index[-1])
+    test_value = float(means.iloc[-1])
+    lower_mu = float(train.index.max()) * 1.01
+    upper_mu = 1e7
+    upper_t0 = 1e4
+    try:
+        (t0, mu), pcov = optimize.curve_fit(
+            lambda L, t0, mu: [model.latency_curve(x, t0, mu) for x in L],
+            train.index.to_numpy(float), train.to_numpy(),
+            p0=[float(train.iloc[0]), max(lower_mu * 2, float(train.index.max()) + 1000)],
+            bounds=([0, lower_mu], [upper_t0, upper_mu]),
+        )
+    except (RuntimeError, ValueError) as error:
+        return {"valid": False, "reason": str(error), "levels": int(len(means)), "held_out": held_out}
+    t0, mu = float(t0), float(mu)
+    if pcov is None or not np.all(np.isfinite(pcov)):
+        return {"valid": False, "reason": "covariance is not finite", "t0_ms": t0, "mu": mu,
+                "levels": int(len(means)), "held_out": held_out}
+    on_bound = (
+        mu <= lower_mu * (1 + 1e-6) or mu >= upper_mu * (1 - 1e-9)
+        or t0 <= 1e-9 or t0 >= upper_t0 * (1 - 1e-9)
+    )
+    pred = float(model.latency_curve(test_load, t0, mu))
+    result = {
+        "valid": not on_bound,
+        "reason": "fit hit a parameter bound" if on_bound else "",
+        "t0_ms": t0, "mu": mu, "load": test_load, "predicted": pred, "measured": test_value,
+        "ape": abs(pred - test_value) / test_value if test_value else np.nan,
+        "levels": int(len(means)), "held_out": held_out,
+    }
+    return result
+
+
+def _latency_runs(runs: pd.DataFrame) -> pd.DataFrame:
+    """Drop censored cells. A delivery ratio under 0.99 is not a latency sample."""
+    if "censored" not in runs.columns:
+        return runs
+    return runs[runs["censored"] != True]  # noqa: E712 — pandas NA stays
+
+
 def analyse(results: Path, matrix: Path) -> None:
     out = results / "_analysis"
     out.mkdir(exist_ok=True)
@@ -96,11 +168,13 @@ def analyse(results: Path, matrix: Path) -> None:
         sys.exit("no finished runs found")
     runs.to_csv(out / "runs.csv", index=False)
 
-    # H1: p99 latency per broker x load with cluster-bootstrap CI; H1 holds if upper CI < 50 ms.
-    b = runs[runs.stage == "B"]
+    # H1: HDR p99 per broker x load. Censored cells (delivery < 0.99) are left out.
+    # The CI resamples runs, which is the unit of observation. H1 holds if the upper CI < 50 ms.
+    b = _latency_runs(runs)
+    b = b[b.stage == "B"]
     h1 = []
     for (broker, load), g in b.groupby(["broker", "load"]):
-        point, lo, hi = cluster_bootstrap_quantile(list(g.run_id), samples, 99)
+        point, lo, hi = _bootstrap_median(g.p99.to_numpy(float))
         h1.append(dict(broker=broker, load=load, runs=len(g), p99=point, ci_low=lo, ci_high=hi, h1_holds=hi < 50))
     pd.DataFrame(h1).to_csv(out / "h1_p99.csv", index=False)
 
@@ -117,22 +191,11 @@ def analyse(results: Path, matrix: Path) -> None:
                                         a12=vargha_delaney_a12(groups[a], groups[c])))
     pd.DataFrame(comparisons).to_csv(out / "broker_comparisons.csv", index=False)
 
-    # H4: fit E[T](L) = T0 + 1000/(mu - L) on the two lower loads, predict the highest load (out of sample).
+    # H4: same censored-cell filter as H1. A two-point fit is reported invalid.
     h4 = []
     for broker, g in b.groupby("broker"):
         means = g.groupby("load")["mean"].mean().sort_index()
-        if len(means) < 3:
-            continue
-        train, test = means.iloc[:-1], means.iloc[-1:]
-        try:
-            (t0, mu), _ = optimize.curve_fit(lambda L, t0, mu: [model.latency_curve(x, t0, mu) for x in L],
-                                             train.index.to_numpy(float), train.to_numpy(),
-                                             p0=[train.iloc[0], test.index[0] * 2], bounds=([0, test.index[0] * 1.01], [1e4, 1e7]))
-            pred = model.latency_curve(float(test.index[0]), t0, mu)
-            h4.append(dict(broker=broker, t0_ms=t0, mu=mu, load=test.index[0], predicted=pred,
-                           measured=test.iloc[0], ape=abs(pred - test.iloc[0]) / test.iloc[0]))
-        except (RuntimeError, ValueError) as error:
-            h4.append(dict(broker=broker, error=str(error)))
+        h4.append(dict(broker=broker, **fit_latency_curve(means)))
     pd.DataFrame(h4).to_csv(out / "h4_model_fit.csv", index=False)
 
     # H2/H3/H5: reliability per broker x nu x kill.

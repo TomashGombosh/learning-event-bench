@@ -11,6 +11,8 @@ export interface LatencySample {
   readonly serviceMs?: number;
   /** Scheduled -> actual send. Large values mean the generator event loop is behind. */
   readonly scheduleLagMs?: number;
+  /** Sender's scheduled time. The reservoir uses it to show the sample covers the window. */
+  readonly scheduledAtMs?: number;
 }
 
 export function latencyOf(
@@ -21,7 +23,7 @@ export function latencyOf(
   sentAtMs?: number,
 ): LatencySample {
   const totalMs = receivedAtMs - scheduledAtMs;
-  const sample: LatencySample = { roomId, totalMs };
+  const sample: LatencySample = { roomId, totalMs, scheduledAtMs };
   const withPath = gatewayInAtMs === undefined ? sample : {
     ...sample,
     uplinkMs: gatewayInAtMs - scheduledAtMs,

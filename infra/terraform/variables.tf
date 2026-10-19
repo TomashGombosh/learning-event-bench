@@ -33,13 +33,13 @@ variable "git_ref" {
 }
 
 variable "bench_profile" {
-  description = "smoke = 6 cells x 60s (default). full = factorial using bench_reps and bench_duration_s (~12.5 h on c7g.4xlarge)."
+  description = "smoke = 17 cells x 60s (default, ~45-60 min). kafka-rerun = ~40 Kafka cells. full = factorial using bench_reps and bench_duration_s."
   type        = string
   default     = "smoke"
 
   validation {
-    condition     = contains(["smoke", "full"], var.bench_profile)
-    error_message = "bench_profile must be smoke or full."
+    condition     = contains(["smoke", "kafka-rerun", "full"], var.bench_profile)
+    error_message = "bench_profile must be smoke, kafka-rerun, or full."
   }
 }
 
@@ -50,7 +50,7 @@ variable "bench_reps" {
 }
 
 variable "bench_duration_s" {
-  description = "Measurement window per run, seconds, when bench_profile=full. Smoke forces 60s."
+  description = "Measurement window per run, seconds, when bench_profile is full or kafka-rerun. Smoke forces 60s."
   type        = number
   default     = 240
 }

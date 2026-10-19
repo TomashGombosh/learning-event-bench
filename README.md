@@ -70,10 +70,24 @@ python3 -m venv .venv && .venv/bin/pip install -r analysis/requirements.txt pyte
 
 ```bash
 docker compose build
-python3 experiments/make_matrix.py          # 128 randomised runs (stages A, B, C)
-./experiments/run_matrix.sh                 # ~12.5 h on c7g.4xlarge, resumable
+python3 experiments/make_matrix.py smoke    # 17 cells. Also: kafka-rerun, or 5 for the full factorial
+./experiments/run_matrix.sh                 # resumable; full and kafka-rerun can abort on the validity gate
 .venv/bin/python analysis/analyze.py results experiments/configs/matrix.csv
 ```
+
+### Which run to start
+
+On c7g.4xlarge, in this order. Each step is a `bench-up` workflow dispatch. The input is `profile`.
+
+| Step | `profile` | What runs | Wall clock | What to read before the next step |
+|---|---|---|---|---|
+| 1 | `smoke` (the default) | 17 cells, 60 s window: one cell per broker × scenario A/B/C, including plain kafka B L5000, kafka-tuned C at both disconnect rates, plain kafka C, `kafka-acks` (acks=all, idempotent off), pubsub C, streams C L5000 | about 45–60 min | CloudWatch `/leb/bench`, stream `<run_id>/bench.log`, line `VALIDITY_SUMMARY`. Also `results/validity.json`. |
+| 2 | `kafka-rerun` | 40 Kafka cells (plain, tuned, `kafka-acks`) at B L3000/L4000/L5000 and C L2500, plus a few C L5000 stress cells. 240 s window. Fail-fast is on. | about 4–5 h | `VALIDITY_SUMMARY` again. A failed canary (the first cell of a broker × scenario) stops the instance. |
+| 3 | `full` | Factorial, `bench_reps=5`, 240 s window. Stage C includes plain kafka and both L2500 and L5000. Fail-fast is on. | about 23 h if every canary passes | `VALIDITY_SUMMARY`, then `bench-results`. |
+
+Fail-fast (`VALIDITY_FAIL_FAST`, default 1 for `kafka-rerun` and `full`, 0 for `smoke`) aborts after the first cell of a broker × scenario when that cell fails the gate. The instance writes `DONE.json` with `status=aborted_invalid` and a `reason`, uploads results, and shuts down. `VALIDITY_CATCHUP_ERROR_MAX` (default 10) is how many `reconnect deadline exceeded` / `connect timeout` / `operation has timed out` lines a cell may have in `gateways.log`.
+
+`bench-results` uploads `results/validity.json`, each `results/<run>/shard-*/summary.json`, and each `results/<run>/gateways.log` with the analysis tables.
 
 See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Actions + OIDC + Terraform, results in S3, auto-destroy after 41 h) and [docs/EC2.md](docs/EC2.md) for manual runs.
 
@@ -81,7 +95,7 @@ See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Ac
 
 | Component | Variable | Default | Meaning |
 |---|---|---|---|
-| gateway | `BROKER` | `memory` | `memory`, `pubsub`, `streams`, `kafka` (acks=all, idempotent), `kafka-tuned` (acks=1) |
+| gateway | `BROKER` | `memory` | `memory`, `pubsub`, `streams`, `kafka` (acks=all, idempotent), `kafka-tuned` (acks=1), `kafka-acks` (acks=all, not idempotent) |
 | gateway | `STREAM_MAXLEN` | `10000` | Redis Streams replay window *L* |
 | gateway | `KAFKA_PARTITIONS` | `12` | partitions of topic `collab-events` |
 | load generator | `ROOMS`, `CLIENTS_PER_ROOM`, `RATE_PER_CLIENT` | 5, 5, 5 | Λ = rooms · n · λ_u |
@@ -91,11 +105,12 @@ See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Ac
 | load generator | `NETEM` | – | e.g. `delay 10ms 5ms distribution normal` (needs `NET_ADMIN`) |
 
 ### Outputs (per run and shard: `results/<run>/shard-<i>/`)
-`summary.json` (config, counters, HDR percentiles, R, `clientsLost`, `clientsNotConverged`), `latency_percentiles.csv`, `latency_samples.csv`
-(uniform reservoir of raw samples with uplink/downlink split), `rooms.csv`, `replicas.csv`.
+`summary.json` (config, counters, HDR percentiles, delivery ratio, R, `clientsLost`, `clientsNotConverged`), `latency_percentiles.csv`, `latency_samples.csv`
+(uniform reservoir of raw samples with uplink/downlink split and scheduled time), `rooms.csv`, `replicas.csv`.
+`results/validity.json` is the PASS/FAIL table for the run.
 
 ## Known limitations
-- Kafka catch-up uses a short-lived consumer group (≈3–6 s group join); this is part of what is measured.
+- Kafka catch-up of a recent offset is served from an in-memory ring on the live consumer (size `STREAM_MAXLEN`). A short-lived consumer group is opened only when the requested offset is older than that ring.
 - WebSocket runs over TCP, so `netem` packet loss turns into delay rather than lost events; divergence is
   produced by disconnects and gateway failures (see the reliability model).
 - Latency of re-sent outbox operations is measured from their original scheduled time (time-to-visibility).

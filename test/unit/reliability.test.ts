@@ -44,12 +44,15 @@ describe('reliability', () => {
   });
 
   it('decomposes latency into uplink and downlink', () => {
-    expect(latencyOf('r', 100, 130, 110)).toEqual({ roomId: 'r', totalMs: 30, uplinkMs: 10, downlinkMs: 20 });
+    expect(latencyOf('r', 100, 130, 110)).toEqual({
+      roomId: 'r', totalMs: 30, uplinkMs: 10, downlinkMs: 20, scheduledAtMs: 100,
+    });
   });
 
   it('separates service latency from open-loop schedule lag', () => {
     expect(latencyOf('r', 100, 180, 160, 170)).toEqual({
       roomId: 'r', totalMs: 80, uplinkMs: 60, downlinkMs: 20, serviceMs: 10, scheduleLagMs: 70,
+      scheduledAtMs: 100,
     });
   });
 });

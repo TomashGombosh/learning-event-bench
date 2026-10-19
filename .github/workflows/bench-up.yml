@@ -8,14 +8,15 @@ on:
         default: c7g.4xlarge
         type: string
       profile:
-        description: smoke = 6 cells, 60s. full = 128-cell matrix, about 12.5h. Default never starts the long run.
+        description: smoke (~1h) then kafka-rerun, then full. Default never starts the long run.
         type: choice
         options:
           - smoke
+          - kafka-rerun
           - full
         default: smoke
       bench_reps:
-        description: Repetitions per cell when profile=full (5 = 128 runs). Ignored for smoke.
+        description: Repetitions per cell when profile=full (5 includes plain kafka and C at L2500). Ignored for smoke and kafka-rerun.
         default: "5"
         type: string
       bench_duration_s:
@@ -88,14 +89,21 @@ jobs:
           # are required even though the log group resource does not use them.
           # One export feeds import, apply, and any later terraform command in this job.
           RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA::7}"
-          if [ "$PROFILE" = "full" ]; then
-            REPS="$BENCH_REPS"
-            DURATION="$BENCH_DURATION_S"
-          else
-            PROFILE=smoke
-            REPS=1
-            DURATION=60
-          fi
+          case "$PROFILE" in
+            full)
+              REPS="$BENCH_REPS"
+              DURATION="$BENCH_DURATION_S"
+              ;;
+            kafka-rerun)
+              REPS=1
+              DURATION="$BENCH_DURATION_S"
+              ;;
+            *)
+              PROFILE=smoke
+              REPS=1
+              DURATION=60
+              ;;
+          esac
           {
             echo "RUN_ID=${RUN_ID}"
             echo "TF_VAR_region=${AWS_REGION}"
