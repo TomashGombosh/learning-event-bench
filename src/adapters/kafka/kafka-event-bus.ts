@@ -13,6 +13,8 @@ export interface KafkaOptions {
   /** acks=1 (latency-tuned) or -1 (all ISR, default durable). */
   readonly acks: 1 | -1;
   readonly idempotent: boolean;
+  /** null: kafkajs does not cap in-flight produce requests. Idempotent producers use 5. */
+  readonly maxInFlight: number | null;
   /** Per-room catch-up ring. Recent reconnects read this instead of joining a consumer group. */
   readonly catchUpBuffer?: number;
 }
@@ -25,15 +27,10 @@ export interface KafkaOptions {
  */
 export class RoomReplayBuffer {
   private readonly rooms = new Map<string, StoredEvent[]>();
-  /** Highest offset the live consumer has applied, per partition. */
-  private readonly caughtUp = new Map<number, bigint>();
 
   constructor(private readonly capacity: number) {}
 
   push(stored: StoredEvent): void {
-    const { partition, offset } = parseKafkaEventId(stored.id);
-    const prev = this.caughtUp.get(partition);
-    if (prev === undefined || offset > prev) this.caughtUp.set(partition, offset);
     let ring = this.rooms.get(stored.event.roomId);
     if (!ring) {
       ring = [];
@@ -44,17 +41,20 @@ export class RoomReplayBuffer {
   }
 
   /**
-   * Room events with offset >= `from` when the ring still holds `from` and the live
-   * consumer has reached `high - 1`. Null means the caller should read the log.
+   * Room events on `partition` with offset >= `from`, when the ring still holds `from`.
+   * Null means the offset has fallen out of the ring and the caller should read the log.
+   * The live consumer being a few records behind the high watermark is not a miss:
+   * those records are delivered on the subscription the client just joined.
    */
-  slice(roomId: string, partition: number, from: bigint, high: bigint, limit?: number): StoredEvent[] | null {
-    const caught = this.caughtUp.get(partition);
-    if (caught === undefined || caught < high - 1n) return null;
+  slice(roomId: string, partition: number, from: bigint, limit?: number): StoredEvent[] | null {
     const ring = this.rooms.get(roomId);
-    if (!ring || ring.length === 0) return this.capacity > 0 ? [] : null;
-    const oldest = parseKafkaEventId(ring[0].id).offset;
-    if (from < oldest) return null;
-    const missed = ring.filter((stored) => parseKafkaEventId(stored.id).offset >= from);
+    if (!ring || ring.length === 0) return null;
+    const oldest = parseKafkaEventId(ring[0].id);
+    if (oldest.partition !== partition || from < oldest.offset) return null;
+    const missed = ring.filter((stored) => {
+      const parsed = parseKafkaEventId(stored.id);
+      return parsed.partition === partition && parsed.offset >= from;
+    });
     return limit === undefined ? missed : missed.slice(0, limit);
   }
 }
@@ -86,7 +86,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     // must stay at or below 5. kafkajs has no linger.ms; each send is one Produce request.
     this.producer = this.kafka.producer({
       idempotent: options.idempotent,
-      maxInFlightRequests: options.idempotent ? 5 : undefined,
+      maxInFlightRequests: options.maxInFlight ?? undefined,
     });
     this.consumer = this.kafka.consumer({
       groupId: `gateway-${randomUUID()}`,
@@ -109,6 +109,8 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     const metadata = await this.admin.fetchTopicMetadata({ topics: [this.options.topic] });
     this.partitions = metadata.topics[0].partitions.length;
     await Promise.all([this.producer.connect(), this.consumer.connect()]);
+    const inFlight = this.options.maxInFlight === null ? 'unlimited' : String(this.options.maxInFlight);
+    console.log(`producer idempotent=${this.options.idempotent} acks=${this.options.acks} maxInFlight=${inFlight}`);
     await this.consumer.subscribe({ topic: this.options.topic, fromBeginning: false });
     await this.consumer.run({
       eachBatchAutoResolve: true,
@@ -151,14 +153,21 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
    */
   async readAfter(roomId: string, lastId: EventId | null, limit?: number): Promise<StoredEvent[]> {
     const partition = partitionOf(roomId, this.partitions);
+    // Do not compare the ring to the high watermark. Under load the watermark moves
+    // on every produce, so that check made every reconnect fall through to a new
+    // consumer group (cell 011: ν=1, offline fraction 0.27, 47 clients still down).
+    if (lastId !== null) {
+      const from = parseKafkaEventId(lastId).offset + 1n;
+      const buffered = this.replay.slice(roomId, partition, from, limit);
+      if (buffered !== null) return buffered;
+    }
     const startOffset = lastId === null ? null : parseKafkaEventId(lastId).offset + 1n;
     const offsets = await this.admin.fetchTopicOffsets(this.options.topic);
     const high = BigInt(offsets.find((o) => o.partition === partition)!.high);
     const low = BigInt(offsets.find((o) => o.partition === partition)!.low);
     const from = startOffset ?? low;
     if (from >= high) return [];
-    const buffered = this.replay.slice(roomId, partition, from, high, limit);
-    if (buffered !== null) return buffered;
+    console.warn(`kafka catch-up fallback room=${roomId} from=${from} ring does not cover the offset`);
     return this.consumeRange(roomId, partition, from, high, limit);
   }
 

@@ -19,6 +19,27 @@ export interface BrokerEnv {
   readonly streamMaxLen: number;
 }
 
+export interface KafkaProducerSettings {
+  readonly idempotent: boolean;
+  readonly acks: 1 | -1;
+  /** null means kafkajs does not cap in-flight produce requests. */
+  readonly maxInFlight: number | null;
+}
+
+/** The producer the paper should quote. Null for brokers that are not Kafka. */
+export function kafkaProducerSettings(kind: string): KafkaProducerSettings | null {
+  switch (kind) {
+    case 'kafka':
+      return { idempotent: true, acks: -1, maxInFlight: 5 };
+    case 'kafka-tuned':
+      return { idempotent: false, acks: 1, maxInFlight: null };
+    case 'kafka-acks':
+      return { idempotent: false, acks: -1, maxInFlight: null };
+    default:
+      return null;
+  }
+}
+
 /** Composition helper: the only place that knows about concrete broker classes. */
 export async function createBroker(kind: BrokerKind, env: BrokerEnv): Promise<BrokerBundle> {
   switch (kind) {
@@ -35,15 +56,14 @@ export async function createBroker(kind: BrokerKind, env: BrokerEnv): Promise<Br
     case 'kafka':
     case 'kafka-tuned':
     case 'kafka-acks': {
-      // kafka: acks=all, idempotent. kafka-tuned: acks=1, not idempotent.
-      // kafka-acks: acks=all, not idempotent (separates idempotence from the ack).
-      const tuned = kind === 'kafka-tuned';
+      const producer = kafkaProducerSettings(kind)!;
       const bus = new KafkaEventBus({
         brokers: env.kafkaBrokers,
         topic: 'collab-events',
         partitions: env.kafkaPartitions,
-        acks: tuned ? 1 : -1,
-        idempotent: kind === 'kafka',
+        acks: producer.acks,
+        idempotent: producer.idempotent,
+        maxInFlight: producer.maxInFlight,
         catchUpBuffer: env.streamMaxLen > 0 ? env.streamMaxLen : 10_000,
       });
       await bus.start();

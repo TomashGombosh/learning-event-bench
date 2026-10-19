@@ -85,7 +85,7 @@ On c7g.4xlarge, in this order. Each step is a `bench-up` workflow dispatch. The 
 | 2 | `kafka-rerun` | 40 Kafka cells (plain, tuned, `kafka-acks`) at B L3000/L4000/L5000 and C L2500, plus a few C L5000 stress cells. 240 s window. Fail-fast is on. | about 4–5 h | `VALIDITY_SUMMARY` again. A failed canary (the first cell of a broker × scenario) stops the instance. |
 | 3 | `full` | Factorial, `bench_reps=5`, 240 s window. Stage C includes plain kafka and both L2500 and L5000. Fail-fast is on. | about 23 h if every canary passes | `VALIDITY_SUMMARY`, then `bench-results`. |
 
-Fail-fast (`VALIDITY_FAIL_FAST`, default 1 for `kafka-rerun` and `full`, 0 for `smoke`) aborts after the first cell of a broker × scenario when that cell fails the gate. The instance writes `DONE.json` with `status=aborted_invalid` and a `reason`, uploads results, and shuts down. `VALIDITY_CATCHUP_ERROR_MAX` (default 10) is how many `reconnect deadline exceeded` / `connect timeout` / `operation has timed out` lines a cell may have in `gateways.log`.
+Fail-fast (`VALIDITY_FAIL_FAST`, default 1 for `kafka-rerun` and `full`, **0 for `smoke`**) aborts after the first cell of a broker × scenario only on a harness fault: attempted rate under 99%, catch-up errors above `VALIDITY_CATCHUP_ERROR_MAX` (default 10), fewer clients connected than expected, a reservoir that does not cover the window while delivery was complete, or a missing shard. A smoke run therefore finishes with `aborted=0` even if some cells are marked `SATURATED_VALID` or `DIVERGED`. That is deliberate: smoke exists to record every risky cell. `SATURATED_VALID` (generator kept up, broker delivered under 99%) is a measured saturation point, not an abort. Pubsub `DIVERGED` is expected, because that broker cannot replay. The instance writes `DONE.json` with `status=aborted_invalid` and a `reason` only when fail-fast fires, then uploads results and shuts down.
 
 `bench-results` uploads `results/validity.json`, each `results/<run>/shard-*/summary.json`, and each `results/<run>/gateways.log` with the analysis tables.
 
@@ -105,7 +105,7 @@ See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Ac
 | load generator | `NETEM` | – | e.g. `delay 10ms 5ms distribution normal` (needs `NET_ADMIN`) |
 
 ### Outputs (per run and shard: `results/<run>/shard-<i>/`)
-`summary.json` (config, counters, HDR percentiles, delivery ratio, R, `clientsLost`, `clientsNotConverged`), `latency_percentiles.csv`, `latency_samples.csv`
+`summary.json` (config, counters, HDR percentiles, delivery ratio, Kafka `producer` `{idempotent, acks, maxInFlight}`, R, `clientsLost`, `clientsNotConverged`), `latency_percentiles.csv`, `latency_samples.csv`
 (uniform reservoir of raw samples with uplink/downlink split and scheduled time), `rooms.csv`, `replicas.csv`.
 `results/validity.json` is the PASS/FAIL table for the run.
 

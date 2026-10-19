@@ -52,9 +52,9 @@ cell_complete() {
 # One grep-able line per cell. Offered is the matrix load, not the sum of whichever
 # shard files happened to land: a timed-out shard used to shrink offered (3300, 800).
 # The rate next to offered is attempted sends (sent + skipped while offline) per second.
-# SATURATED when any shard says so, attempted < 95% of nominal, or a shard file is missing.
-# CLIENTS_OFFLINE, DIVERGED and CENSORED are separate: a fault cell is not "saturated"
-# just because clients skipped a slot, and a short delivery ratio is not a latency sample.
+# SATURATED when the generator attempted under 99% or a shard file is missing.
+# SATURATED_VALID when the generator kept up and the broker delivered under 99%.
+# CLIENTS_OFFLINE and DIVERGED stay separate from both.
 emit_cell_summary() {
   python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY' || echo "CELL $1 broker=$2 offered/attempted=$3/0.0 FAILED SATURATED"
 import json, sys
@@ -100,10 +100,17 @@ clients_not_converged = sum(int(s.get("clientsNotConverged", 0)) for s in summar
 missing = len(paths) < expected
 offline_frac = skipped / (sent + skipped) if (sent + skipped) else 0.0
 delivery_ratio = min(ratios) if ratios else 0.0
-short = nominal > 0 and attempted < 0.95 * nominal
-saturated = any(bool(s.get("load", {}).get("saturated")) for s in summaries) or missing or short
-if saturated and "SATURATED" not in flags:
+generator_short = nominal > 0 and attempted < 0.99 * nominal
+# Generator kept up, clients were online, broker did not deliver: a measured saturation
+# point, not a harness failure. Pubsub loss under faults is divergence (no replay).
+broker_saturated = (
+    bool(ratios) and delivery_ratio < 0.99 and offline_frac <= 0.05
+    and not generator_short and not missing and broker != "pubsub"
+)
+if missing or generator_short:
     flags.append("SATURATED")
+elif broker_saturated:
+    flags.append("SATURATED_VALID")
 if offline_frac > 0.05:
     flags.append("CLIENTS_OFFLINE")
 if rooms_diverged > 0:

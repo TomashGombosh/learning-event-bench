@@ -42,6 +42,20 @@ def load_runs(results: Path, matrix: Path) -> tuple[pd.DataFrame, dict[str, np.n
         ratios = [float(s["delivery"]["ratio"]) for s in summaries if isinstance(s.get("delivery"), dict) and "ratio" in s["delivery"]]
         delivery_ratio = min(ratios) if ratios else np.nan
         censored = bool(ratios) and delivery_ratio < 0.99
+        sent_n = skipped_n = attempted = offered = 0.0
+        for summary, counter in zip(summaries, counters):
+            sent_n += float(counter.get("sent", 0))
+            skipped_n += float(counter.get("skippedWhileOffline", 0))
+            cfg = summary.get("config") or {}
+            window = max(0.001, float(cfg.get("WARMUP_S", 0)) + float(cfg.get("DURATION_S", 0)))
+            attempted += (float(counter.get("sent", 0)) + float(counter.get("skippedWhileOffline", 0))) / window
+            offered += float((summary.get("load") or {}).get("offeredPerSec") or 0)
+        offline = skipped_n / (sent_n + skipped_n) if (sent_n + skipped_n) else 0.0
+        attempted_ratio = attempted / offered if offered else 1.0
+        # Generator kept up and the broker did not. Kept in saturation.csv, dropped from H1/H4.
+        saturated_valid = bool(
+            ratios and delivery_ratio < 0.99 and attempted_ratio >= 0.99 and offline <= 0.05 and row.broker != "pubsub"
+        )
         runs.append(dict({k: v for k, v in row._asdict().items() if k != "Index"}, n_samples=len(lat),
                          p50=hdr("p50Ms"), p95=hdr("p95Ms"), p99=hdr("p99Ms"), mean=hdr("meanMs"),
                          rooms_total=len(rm),
@@ -49,7 +63,9 @@ def load_runs(results: Path, matrix: Path) -> tuple[pd.DataFrame, dict[str, np.n
                          clients_lost=sum(int(s.get("clientsLost", 0)) for s in summaries),
                          clients_not_converged=sum(int(s.get("clientsNotConverged", 0)) for s in summaries),
                          sent=sum(c["sent"] for c in counters),
-                         saturated=saturated, delivery_ratio=delivery_ratio, censored=censored))
+                         attempted_ratio=attempted_ratio, offline_fraction=offline,
+                         saturated=saturated, delivery_ratio=delivery_ratio, censored=censored,
+                         saturated_valid=saturated_valid))
     return pd.DataFrame(runs), samples, pd.concat(rooms) if rooms else pd.DataFrame()
 
 
@@ -154,10 +170,13 @@ def fit_latency_curve(means: pd.Series) -> dict:
 
 
 def _latency_runs(runs: pd.DataFrame) -> pd.DataFrame:
-    """Drop censored cells. A delivery ratio under 0.99 is not a latency sample."""
-    if "censored" not in runs.columns:
-        return runs
-    return runs[runs["censored"] != True]  # noqa: E712 — pandas NA stays
+    """Drop censored and SATURATED_VALID cells. Those are not latency samples."""
+    keep = runs
+    if "censored" in keep.columns:
+        keep = keep[keep["censored"] != True]  # noqa: E712 — pandas NA stays
+    if "saturated_valid" in keep.columns:
+        keep = keep[keep["saturated_valid"] != True]  # noqa: E712
+    return keep
 
 
 def analyse(results: Path, matrix: Path) -> None:
@@ -167,8 +186,10 @@ def analyse(results: Path, matrix: Path) -> None:
     if runs.empty:
         sys.exit("no finished runs found")
     runs.to_csv(out / "runs.csv", index=False)
+    if "saturated_valid" in runs.columns:
+        runs[runs["saturated_valid"] == True].to_csv(out / "saturation.csv", index=False)  # noqa: E712
 
-    # H1: HDR p99 per broker x load. Censored cells (delivery < 0.99) are left out.
+    # H1: HDR p99 per broker x load. Censored and SATURATED_VALID cells are left out.
     # The CI resamples runs, which is the unit of observation. H1 holds if the upper CI < 50 ms.
     b = _latency_runs(runs)
     b = b[b.stage == "B"]
