@@ -97,7 +97,8 @@ trap on_exit EXIT
 source "$REPO/experiments/lib/budget.sh"
 # Default is smoke. A dispatch that does not set BENCH_PROFILE=full must not start the long run.
 # kafka-rerun is the ~40 cell Kafka plan. full and kafka-rerun abort when the first cell of a
-# broker x scenario fails the validity gate (VALIDITY_FAIL_FAST=0 disables that).
+# broker x scenario is a harness fault (VALIDITY_FAIL_FAST=0 disables that).
+# Smoke leaves fail-fast off on purpose, so VALIDITY_SUMMARY reports aborted=0 after every cell.
 profile="${BENCH_PROFILE:-smoke}"
 case "$profile" in
   full)

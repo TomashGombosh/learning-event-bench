@@ -1,3 +1,4 @@
+import { kafkaProducerSettings } from '@adapters/broker-factory';
 import { closeSync, fsyncSync, mkdirSync, openSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { evaluateRooms, reliability } from '@domain/reliability';
@@ -127,6 +128,7 @@ async function main(): Promise<void> {
         ratio: deliveryRatio,
         censored: deliveryRatio < 0.99,
       },
+      producer: kafkaProducerSettings(config.BROKER_LABEL),
       rooms: rooms.length,
       divergedRooms: rooms.filter((r) => r.diverged).length,
       clientsLost,

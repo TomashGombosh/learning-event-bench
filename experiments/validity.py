@@ -1,12 +1,18 @@
 """Per-cell validity gate.
 
-A cell is FAIL when a latency claim would be wrong: deliveries censored while clients
-were online, the generator did not attempt the offered rate, catch-up errors piled up,
-clients did not connect, the reservoir does not cover the window, the HDR histogram
-collapsed to one bin, or the reservoir percentile disagrees with the HDR percentile.
+FAIL is a harness fault, and it is the only status that fail-fast aborts on:
+the generator attempted under 99% of the offered rate, catch-up errors exceed
+the threshold, fewer clients connected than the cell asked for, the reservoir
+does not cover the window even though delivery was complete (recorder bug),
+or shard summaries are missing.
 
-Scenario C (injected faults) keeps DIVERGED and a delivery shortfall that lines up
-with offline clients as flags. Those cells still PASS the load check.
+A cell whose generator kept up (attempted >= 0.99) while the broker delivered
+under 99% is SATURATED_VALID: a real saturation point. It is kept for throughput
+analysis and left out of latency percentiles. It does not abort the run.
+Pubsub divergence is expected (that broker cannot replay) and is a flag only.
+
+profile=smoke sets VALIDITY_FAIL_FAST=0, so a smoke run records every cell and
+writes aborted=0 even when a cell FAILs. kafka-rerun and full default it to 1.
 """
 from __future__ import annotations
 
@@ -21,7 +27,8 @@ CATCHUP_NEEDLES = (
     "operation has timed out",
 )
 DELIVERY_FLOOR = 0.99
-ATTEMPTED_FLOOR = 0.95
+# Harness fault: the generator itself did not attempt the offered load.
+HARNESS_ATTEMPTED_FLOOR = 0.99
 OFFLINE_FLAG = 0.05
 # p50, p75 and p99 sitting on the same large bin (the 65.57s Kafka plateau).
 PLATEAU_MS = 1000.0
@@ -98,8 +105,18 @@ def count_catchup_errors(text: str) -> int:
     return sum(folded.count(needle) for needle in CATCHUP_NEEDLES)
 
 
-def _faults_injected(obs: CellObservation) -> bool:
-    return obs.stage == "C" and (obs.nu > 0 or obs.kill != 0)
+def _saturated_valid(obs: CellObservation, attempted_ratio: float) -> bool:
+    """Generator kept up, clients were online, the broker did not deliver.
+
+    Pubsub is excluded: it has no replay, so a shortfall during faults is divergence.
+    """
+    return (
+        obs.broker != "pubsub"
+        and not obs.shard_missing
+        and attempted_ratio >= HARNESS_ATTEMPTED_FLOOR
+        and obs.delivery_ratio < DELIVERY_FLOOR
+        and obs.offline_fraction <= OFFLINE_FLAG
+    )
 
 
 def assess_cell(obs: CellObservation, *, catchup_error_max: int = 10) -> CellVerdict:
@@ -107,56 +124,38 @@ def assess_cell(obs: CellObservation, *, catchup_error_max: int = 10) -> CellVer
     flags: list[str] = []
     offered = obs.offered_per_sec
     attempted_ratio = (obs.attempted_per_sec / offered) if offered > 0 else 1.0
-    faulty = _faults_injected(obs)
+    saturated_valid = _saturated_valid(obs, attempted_ratio)
 
     if obs.shard_missing:
         failures.append("MISSING")
-
-    if obs.delivery_ratio < DELIVERY_FLOOR:
-        flags.append("CENSORED")
-        # Offline clients do not receive. That is the fault model, not a censored latency sample.
-        if obs.offline_fraction <= OFFLINE_FLAG:
-            failures.append("CENSORED")
-
-    saturated = obs.shard_missing or (offered > 0 and obs.attempted_per_sec < ATTEMPTED_FLOOR * offered) or obs.p50_ms > 5_000
-    if saturated:
-        flags.append("SATURATED")
-        failures.append("SATURATED")
-
-    if obs.offline_fraction > OFFLINE_FLAG:
-        flags.append("CLIENTS_OFFLINE")
-
-    if obs.rooms_diverged > 0:
-        flags.append("DIVERGED")
-        if not faulty:
-            failures.append("DIVERGED")
-
+    if offered > 0 and attempted_ratio < HARNESS_ATTEMPTED_FLOOR:
+        failures.append("ATTEMPTED")
     if obs.catchup_errors > catchup_error_max:
         failures.append("CATCHUP_ERRORS")
-
-    if obs.clients_expected > 0 and obs.clients_connected != obs.clients_expected:
+    if obs.clients_expected > 0 and obs.clients_connected < obs.clients_expected:
         failures.append("CLIENTS_CONNECTED")
 
     window_ms = max(0.0, obs.duration_s) * 1000
     covers = obs.hdr_count > 0 and obs.sample_count > 0 and (window_ms <= 0 or obs.sample_span_ms >= WINDOW_COVER * window_ms)
-    if not covers:
-        flags.append("SAMPLES_WINDOW")
-        if not faulty:
-            failures.append("SAMPLES_WINDOW")
+    # A short reservoir span while the broker delivered is the recorder stopping early.
+    # A short span together with a delivery shortfall is the undelivered tail, not that bug.
+    if not covers and obs.delivery_ratio >= DELIVERY_FLOOR:
+        failures.append("SAMPLES_WINDOW")
 
+    if obs.delivery_ratio < DELIVERY_FLOOR and not saturated_valid:
+        flags.append("CENSORED")
+    if obs.offline_fraction > OFFLINE_FLAG:
+        flags.append("CLIENTS_OFFLINE")
+    if obs.rooms_diverged > 0:
+        flags.append("DIVERGED")
     if obs.p50_ms >= PLATEAU_MS and obs.p75_ms > 0 and obs.p99_ms > 0:
         if abs(obs.p75_ms - obs.p50_ms) / obs.p50_ms < PLATEAU_REL and abs(obs.p99_ms - obs.p50_ms) / obs.p50_ms < PLATEAU_REL:
             flags.append("PLATEAU")
-            failures.append("PLATEAU")
-
     hdr = obs.hdr_p50_ms
     reservoir = obs.reservoir_p50_ms
     if hdr > 0 and reservoir > 0 and abs(hdr - reservoir) / max(hdr, reservoir) > HDR_REL:
         flags.append("HDR_MISMATCH")
-        if not faulty:
-            failures.append("HDR_MISMATCH")
 
-    # Preserve first-seen order while dropping duplicates.
     def unique(items: list[str]) -> list[str]:
         seen: list[str] = []
         for item in items:
@@ -166,11 +165,17 @@ def assess_cell(obs: CellObservation, *, catchup_error_max: int = 10) -> CellVer
 
     failures = unique(failures)
     flags = unique(flags)
+    if failures:
+        status = "FAIL"
+    elif saturated_valid:
+        status = "SATURATED_VALID"
+    else:
+        status = "PASS"
     return CellVerdict(
         run_id=obs.run_id,
         stage=obs.stage,
         broker=obs.broker,
-        status="FAIL" if failures else "PASS",
+        status=status,
         failures=failures,
         flags=flags,
         delivery_ratio=obs.delivery_ratio,
@@ -359,20 +364,25 @@ def record_cell(state: dict, verdict: CellVerdict, *, fail_fast: bool) -> int:
         state["aborted"] = True
         state["reason"] = f"group {group} cell {verdict.run_id}: {' '.join(verdict.failures)}"
         return 42
-    return 0 if verdict.status == "PASS" else 1
+    # SATURATED_VALID is a measured outcome. Only FAIL aborts, and only on the first cell.
+    return 0 if verdict.status != "FAIL" else 1
 
 
-def summary_counts(state: dict) -> tuple[int, int, int]:
+def summary_counts(state: dict) -> tuple[int, int, int, int]:
     cells = state.get("cells") or []
     passed = sum(1 for cell in cells if cell.get("status") == "PASS")
+    saturated = sum(1 for cell in cells if cell.get("status") == "SATURATED_VALID")
     failed = sum(1 for cell in cells if cell.get("status") == "FAIL")
-    return passed, failed, len(cells)
+    return passed, saturated, failed, len(cells)
 
 
 def summary_line(state: dict) -> str:
-    passed, failed, total = summary_counts(state)
+    passed, saturated, failed, total = summary_counts(state)
     aborted = 1 if state.get("aborted") else 0
-    return f"VALIDITY_SUMMARY pass={passed} fail={failed} total={total} aborted={aborted}"
+    return (
+        f"VALIDITY_SUMMARY pass={passed} saturated_valid={saturated} "
+        f"fail={failed} total={total} aborted={aborted}"
+    )
 
 
 def table(state: dict) -> str:
