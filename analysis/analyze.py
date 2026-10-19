@@ -13,6 +13,12 @@ import numpy as np
 import pandas as pd
 from scipy import optimize, stats
 
+_EXPERIMENTS = Path(__file__).resolve().parents[1] / "experiments"
+if str(_EXPERIMENTS) not in sys.path:
+    sys.path.insert(0, str(_EXPERIMENTS))
+
+from validity import broker_saturated, loss_explained_by_offline  # noqa: E402
+
 import model
 
 RNG = np.random.default_rng(20261101)
@@ -41,7 +47,6 @@ def load_runs(results: Path, matrix: Path) -> tuple[pd.DataFrame, dict[str, np.n
             return max(float((s.get("latency") or {}).get(key) or 0) for s in summaries)
         ratios = [float(s["delivery"]["ratio"]) for s in summaries if isinstance(s.get("delivery"), dict) and "ratio" in s["delivery"]]
         delivery_ratio = min(ratios) if ratios else np.nan
-        censored = bool(ratios) and delivery_ratio < 0.99
         sent_n = skipped_n = attempted = offered = 0.0
         for summary, counter in zip(summaries, counters):
             sent_n += float(counter.get("sent", 0))
@@ -52,10 +57,13 @@ def load_runs(results: Path, matrix: Path) -> tuple[pd.DataFrame, dict[str, np.n
             offered += float((summary.get("load") or {}).get("offeredPerSec") or 0)
         offline = skipped_n / (sent_n + skipped_n) if (sent_n + skipped_n) else 0.0
         attempted_ratio = attempted / offered if offered else 1.0
-        # Generator kept up and the broker did not. Kept in saturation.csv, dropped from H1/H4.
-        saturated_valid = bool(
-            ratios and delivery_ratio < 0.99 and attempted_ratio >= 0.99 and offline <= 0.05 and row.broker != "pubsub"
-        )
+        # censored: delivery under 99% that offline clients do not explain.
+        # saturated_valid is the subset where the generator kept up and the gap
+        # exceeds (1 - offline) - 0.02. Both leave H1/H4. A shortfall inside the
+        # tolerance stays in the latency tables and is not a saturation point.
+        explained = bool(ratios) and loss_explained_by_offline(float(delivery_ratio), offline)
+        censored = bool(ratios) and float(delivery_ratio) < 0.99 and not explained
+        saturated_valid = bool(ratios) and broker_saturated(float(delivery_ratio), offline, attempted_ratio)
         runs.append(dict({k: v for k, v in row._asdict().items() if k != "Index"}, n_samples=len(lat),
                          p50=hdr("p50Ms"), p95=hdr("p95Ms"), p99=hdr("p99Ms"), mean=hdr("meanMs"),
                          rooms_total=len(rm),
