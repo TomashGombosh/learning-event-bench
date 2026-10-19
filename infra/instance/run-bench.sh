@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the experiment matrix on the EC2 instance (started by systemd unit leb-bench.service).
-# Environment (from /etc/leb/bench.env): RESULTS_BUCKET, RUN_ID, BENCH_REPS, BENCH_DURATION_S, AWS_REGION, GIT_SHA
+# Environment (from /etc/leb/bench.env): RESULTS_BUCKET, RUN_ID, BENCH_REPS, BENCH_DURATION_S, BENCH_PROFILE, BENCH_CELLS, AWS_REGION, GIT_SHA
 set -uo pipefail
 mkdir -p /var/log/leb
 exec > >(tee -a /var/log/leb/bench.log) 2>&1
@@ -109,6 +109,16 @@ case "$profile" in
     echo "profile=kafka-rerun: ~40 Kafka cells duration=${BENCH_DURATION_S}s fail-fast=on"
     VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
     ;;
+  cells)
+    # Only the run ids / presets in BENCH_CELLS (comma separated). Ids are kept, so the
+    # results can replace those cells of the earlier run (fetch_results.sh BASE_RUN_ID).
+    if [ -z "${BENCH_CELLS:-}" ]; then
+      echo "profile=cells needs BENCH_CELLS"
+      exit 1
+    fi
+    echo "profile=cells: ${BENCH_CELLS} duration=${BENCH_DURATION_S}s fail-fast=on"
+    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
+    ;;
   *)
     profile=smoke
     BENCH_DURATION_S=60
@@ -149,6 +159,12 @@ fi
 case "$profile" in
   smoke) (cd experiments && python3 make_matrix.py smoke) ;;
   kafka-rerun) (cd experiments && python3 make_matrix.py kafka-rerun) ;;
+  cells)
+    if ! (cd experiments && python3 make_matrix.py cells "${BENCH_CELLS}"); then
+      echo "make_matrix rejected BENCH_CELLS=${BENCH_CELLS}"
+      exit 1
+    fi
+    ;;
   *) (cd experiments && python3 make_matrix.py "${BENCH_REPS}") ;;
 esac
 cells="$(tail -n +2 experiments/configs/matrix.csv | grep -c . || true)"

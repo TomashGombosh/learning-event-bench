@@ -133,47 +133,65 @@ def tost_two_proportions(k1: int, n1: int, k2: int, n2: int, margin: float) -> f
     return max(1 - stats.norm.cdf((d + margin) / se), stats.norm.cdf((d - margin) / se))
 
 
-def fit_latency_curve(means: pd.Series) -> dict:
-    """H4: E[T](L) = T0 + 1000/(mu - L). Needs >= 3 load levels and an interior fit.
-
-    With four or more levels the highest load is held out. With exactly three, the fit is
-    in-sample: holding one out would leave two points, which is what pinned mu on the bound.
-    """
-    means = means.sort_index()
-    if len(means) < 3:
-        return {"valid": False, "reason": f"need >= 3 load levels, have {len(means)}", "levels": int(len(means))}
-    held_out = len(means) >= 4
-    train = means.iloc[:-1] if held_out else means
-    test_load = float(means.index[-1])
-    test_value = float(means.iloc[-1])
-    lower_mu = float(train.index.max()) * 1.01
-    upper_mu = 1e7
-    upper_t0 = 1e4
-    try:
-        (t0, mu), pcov = optimize.curve_fit(
-            lambda L, t0, mu: [model.latency_curve(x, t0, mu) for x in L],
-            train.index.to_numpy(float), train.to_numpy(),
-            p0=[float(train.iloc[0]), max(lower_mu * 2, float(train.index.max()) + 1000)],
-            bounds=([0, lower_mu], [upper_t0, upper_mu]),
-        )
-    except (RuntimeError, ValueError) as error:
-        return {"valid": False, "reason": str(error), "levels": int(len(means)), "held_out": held_out}
-    t0, mu = float(t0), float(mu)
-    if pcov is None or not np.all(np.isfinite(pcov)):
-        return {"valid": False, "reason": "covariance is not finite", "t0_ms": t0, "mu": mu,
-                "levels": int(len(means)), "held_out": held_out}
-    on_bound = (
-        mu <= lower_mu * (1 + 1e-6) or mu >= upper_mu * (1 - 1e-9)
-        or t0 <= 1e-9 or t0 >= upper_t0 * (1 - 1e-9)
+def _fit_curve(points: pd.Series, lower_mu: float) -> tuple[float, float, float, float]:
+    """Least squares for T0 + 1000/(mu - L) on (load, latency) points. Returns t0, mu and their SEs."""
+    x = points.index.to_numpy(float)
+    y = points.to_numpy(float)
+    upper_mu, upper_t0 = 1e7, 1e4
+    (t0, mu), pcov = optimize.curve_fit(
+        lambda L, t0, mu: [model.latency_curve(v, t0, mu) for v in L],
+        x, y,
+        p0=[float(np.min(y)), max(lower_mu * 1.5, lower_mu + 1000)],
+        bounds=([0, lower_mu], [upper_t0, upper_mu]),
     )
-    pred = float(model.latency_curve(test_load, t0, mu))
-    result = {
-        "valid": not on_bound,
-        "reason": "fit hit a parameter bound" if on_bound else "",
-        "t0_ms": t0, "mu": mu, "load": test_load, "predicted": pred, "measured": test_value,
-        "ape": abs(pred - test_value) / test_value if test_value else np.nan,
-        "levels": int(len(means)), "held_out": held_out,
-    }
+    se = np.sqrt(np.diag(pcov)) if pcov is not None and np.all(np.isfinite(pcov)) else np.array([np.nan, np.nan])
+    return float(t0), float(mu), float(se[0]), float(se[1])
+
+
+def fit_latency_curve(points: pd.Series) -> dict:
+    """H4: fit E[T](L) = T0 + 1000/(mu - L) below the highest load, predict the highest load.
+
+    `points` is indexed by load. It may hold one mean per load or one mean per run (repeated
+    index); per-run points give mu a standard error from the replicate scatter.
+
+    The only constraint on mu is that the system was stable at the loads it was fitted on,
+    so mu > max(train load). The earlier bound mu > 1.01 x test load assumed the answer:
+    every broker of run 20261018T110200Z-c440945 sat exactly on it (mu = 5050). When the
+    fitted mu is at or below the test load the model predicts saturation there: that is a
+    valid result (H4 fails), reported as predicted = inf.
+    An in-sample fit on every level (mu_all, t0_all) is added as a description only.
+    """
+    points = points.sort_index()
+    levels = sorted(set(float(v) for v in points.index))
+    if len(levels) < 3:
+        return {"valid": False, "reason": f"need >= 3 load levels, have {len(levels)}", "levels": len(levels)}
+    test_load = levels[-1]
+    train = points[points.index.to_numpy(float) < test_load]
+    test_value = float(points[points.index.to_numpy(float) == test_load].mean())
+    lower_mu = float(train.index.max()) + 1.0
+    result: dict = {"levels": len(levels), "held_out": True, "train_points": int(len(train)),
+                    "load": test_load, "measured": test_value}
+    try:
+        t0, mu, t0_se, mu_se = _fit_curve(train, lower_mu)
+    except (RuntimeError, ValueError) as error:
+        return dict(result, valid=False, reason=str(error))
+    on_bound = mu <= lower_mu * (1 + 1e-6) or mu >= 1e7 * (1 - 1e-9) or t0 >= 1e4 * (1 - 1e-9)
+    if mu > test_load:
+        pred = float(model.latency_curve(test_load, t0, mu))
+        ape = abs(pred - test_value) / test_value if test_value else np.nan
+        reason = ""
+    else:
+        pred, ape = float("inf"), float("inf")
+        reason = "model predicts saturation at or below the test load"
+    if on_bound:
+        reason = "fit hit a parameter bound"
+    result.update(valid=not on_bound, reason=reason, t0_ms=t0, t0_se=t0_se, mu=mu, mu_se=mu_se,
+                  predicted=pred, ape=ape)
+    try:
+        t0_all, mu_all, _, mu_all_se = _fit_curve(points, test_load + 1.0)
+        result.update(t0_all=t0_all, mu_all=mu_all, mu_all_se=mu_all_se)
+    except (RuntimeError, ValueError):
+        pass
     return result
 
 
@@ -220,11 +238,12 @@ def analyse(results: Path, matrix: Path) -> None:
                                         a12=vargha_delaney_a12(groups[a], groups[c])))
     pd.DataFrame(comparisons).to_csv(out / "broker_comparisons.csv", index=False)
 
-    # H4: same censored-cell filter as H1. A two-point fit is reported invalid.
+    # H4: same censored-cell filter as H1. Fewer than three load levels is reported invalid.
     h4 = []
     for broker, g in b.groupby("broker"):
-        means = g.groupby("load")["mean"].mean().sort_index()
-        h4.append(dict(broker=broker, **fit_latency_curve(means)))
+        # One point per run: replicate scatter gives mu a standard error.
+        per_run = pd.Series(g["mean"].to_numpy(float), index=g["load"].to_numpy(float))
+        h4.append(dict(broker=broker, **fit_latency_curve(per_run)))
     pd.DataFrame(h4).to_csv(out / "h4_model_fit.csv", index=False)
 
     # H2/H3/H5: reliability per broker x nu x kill.

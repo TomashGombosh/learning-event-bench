@@ -13,8 +13,13 @@ on:
         options:
           - smoke
           - kafka-rerun
+          - cells
           - full
         default: smoke
+      cells:
+        description: profile=cells only. Run ids of an earlier matrix and/or presets (rerun-20261018-kafka, rerun-20261018-kafka-reliability, rerun-20261018-streams-c), comma separated.
+        default: ""
+        type: string
       bench_reps:
         description: Repetitions per cell when profile=full (5 includes plain kafka and C at L2500). Ignored for smoke and kafka-rerun.
         default: "5"
@@ -76,12 +81,22 @@ jobs:
             exit 1
           fi
 
+      - name: Validate the cell list
+        if: ${{ inputs.profile == 'cells' }}
+        working-directory: experiments
+        env:
+          CELLS: ${{ inputs.cells }}
+        run: |
+          # Fail here, before an instance is billed, on a typo or an empty list.
+          python3 make_matrix.py cells "$CELLS" --dry-run
+
       - name: Export Terraform variables
         env:
           INSTANCE_TYPE: ${{ inputs.instance_type || 'c7g.4xlarge' }}
           PROFILE: ${{ inputs.profile || 'smoke' }}
           BENCH_REPS: ${{ inputs.bench_reps || '5' }}
           BENCH_DURATION_S: ${{ inputs.bench_duration_s || '240' }}
+          CELLS: ${{ inputs.cells }}
           RESULTS_BUCKET: ${{ vars.RESULTS_BUCKET }}
           PERMISSIONS_BOUNDARY_ARN: ${{ vars.PERMISSIONS_BOUNDARY_ARN }}
         run: |
@@ -95,6 +110,10 @@ jobs:
               DURATION="$BENCH_DURATION_S"
               ;;
             kafka-rerun)
+              REPS=1
+              DURATION="$BENCH_DURATION_S"
+              ;;
+            cells)
               REPS=1
               DURATION="$BENCH_DURATION_S"
               ;;
@@ -113,6 +132,12 @@ jobs:
             echo "TF_VAR_run_id=${RUN_ID}"
             echo "TF_VAR_git_ref=${GITHUB_SHA}"
             echo "TF_VAR_bench_profile=${PROFILE}"
+            # Spaces and commas both separate cells; the instance env file wants no spaces.
+            if [ "$PROFILE" = cells ]; then
+              echo "TF_VAR_bench_cells=$(printf '%s' "$CELLS" | tr -s ' \t\n' ',' | sed 's/^,//; s/,$//; s/,,*/,/g')"
+            else
+              echo "TF_VAR_bench_cells="
+            fi
             echo "TF_VAR_bench_reps=${REPS}"
             echo "TF_VAR_bench_duration_s=${DURATION}"
             echo "TF_VAR_max_runtime_minutes=2460"
