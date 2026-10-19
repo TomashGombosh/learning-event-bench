@@ -6,10 +6,12 @@ the threshold, fewer clients connected than the cell asked for, the reservoir
 does not cover the window even though delivery was complete (recorder bug),
 or shard summaries are missing.
 
-A cell whose generator kept up (attempted >= 0.99) while the broker delivered
-under 99% is SATURATED_VALID: a real saturation point. It is kept for throughput
-analysis and left out of latency percentiles. It does not abort the run.
-Pubsub divergence is expected (that broker cannot replay) and is a flag only.
+A cell whose generator kept up (attempted >= 0.99) while delivery fell more than
+OFFLINE_DELIVERY_TOLERANCE below (1 - offline) is SATURATED_VALID: the broker,
+not the clients that were offline. It is kept for throughput analysis and left
+out of latency percentiles. It does not abort the run. A shortfall inside that
+tolerance is CLIENTS_OFFLINE on every broker. Pubsub divergence is expected
+(that broker cannot replay) and is a flag only.
 
 profile=smoke sets VALIDITY_FAIL_FAST=0, so a smoke run records every cell and
 writes aborted=0 even when a cell FAILs. kafka-rerun and full default it to 1.
@@ -30,6 +32,8 @@ DELIVERY_FLOOR = 0.99
 # Harness fault: the generator itself did not attempt the offered load.
 HARNESS_ATTEMPTED_FLOOR = 0.99
 OFFLINE_FLAG = 0.05
+# Delivery this far below (1 - offline) is the broker, not clients that were offline.
+OFFLINE_DELIVERY_TOLERANCE = 0.02
 # p50, p75 and p99 sitting on the same large bin (the 65.57s Kafka plateau).
 PLATEAU_MS = 1000.0
 PLATEAU_REL = 0.05
@@ -105,17 +109,43 @@ def count_catchup_errors(text: str) -> int:
     return sum(folded.count(needle) for needle in CATCHUP_NEEDLES)
 
 
-def _saturated_valid(obs: CellObservation, attempted_ratio: float) -> bool:
-    """Generator kept up, clients were online, the broker did not deliver.
+def expected_delivery(offline_fraction: float) -> float:
+    """Share of events online clients should still receive."""
+    return max(0.0, 1.0 - max(0.0, _finite(offline_fraction)))
 
-    Pubsub is excluded: it has no replay, so a shortfall during faults is divergence.
+
+def broker_saturated(
+    delivery_ratio: float,
+    offline_fraction: float,
+    attempted_ratio: float,
+    *,
+    shard_missing: bool = False,
+) -> bool:
+    """Generator kept up, and delivery is below what the online clients should have received.
+
+    Expected delivery is (1 - offline). A gap larger than OFFLINE_DELIVERY_TOLERANCE is
+    broker saturation. The same comparison applies to every broker, including pubsub.
     """
-    return (
-        obs.broker != "pubsub"
-        and not obs.shard_missing
-        and attempted_ratio >= HARNESS_ATTEMPTED_FLOOR
-        and obs.delivery_ratio < DELIVERY_FLOOR
-        and obs.offline_fraction <= OFFLINE_FLAG
+    if shard_missing or attempted_ratio < HARNESS_ATTEMPTED_FLOOR:
+        return False
+    floor = expected_delivery(offline_fraction) - OFFLINE_DELIVERY_TOLERANCE
+    return delivery_ratio < floor
+
+
+def loss_explained_by_offline(delivery_ratio: float, offline_fraction: float) -> bool:
+    """Delivery is under 99%, but within tolerance of (1 - offline), and some clients were offline."""
+    if offline_fraction <= 0 or delivery_ratio >= DELIVERY_FLOOR:
+        return False
+    floor = expected_delivery(offline_fraction) - OFFLINE_DELIVERY_TOLERANCE
+    return delivery_ratio >= floor
+
+
+def _saturated_valid(obs: CellObservation, attempted_ratio: float) -> bool:
+    return broker_saturated(
+        obs.delivery_ratio,
+        obs.offline_fraction,
+        attempted_ratio,
+        shard_missing=obs.shard_missing,
     )
 
 
@@ -142,9 +172,11 @@ def assess_cell(obs: CellObservation, *, catchup_error_max: int = 10) -> CellVer
     if not covers and obs.delivery_ratio >= DELIVERY_FLOOR:
         failures.append("SAMPLES_WINDOW")
 
-    if obs.delivery_ratio < DELIVERY_FLOOR and not saturated_valid:
+    explained = loss_explained_by_offline(obs.delivery_ratio, obs.offline_fraction)
+    # CENSORED is an unexplained shortfall. Saturation and offline clients already name the cause.
+    if obs.delivery_ratio < DELIVERY_FLOOR and not saturated_valid and not explained:
         flags.append("CENSORED")
-    if obs.offline_fraction > OFFLINE_FLAG:
+    if obs.offline_fraction > OFFLINE_FLAG or explained:
         flags.append("CLIENTS_OFFLINE")
     if obs.rooms_diverged > 0:
         flags.append("DIVERGED")

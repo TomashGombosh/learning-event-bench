@@ -53,12 +53,15 @@ cell_complete() {
 # shard files happened to land: a timed-out shard used to shrink offered (3300, 800).
 # The rate next to offered is attempted sends (sent + skipped while offline) per second.
 # SATURATED when the generator attempted under 99% or a shard file is missing.
-# SATURATED_VALID when the generator kept up and the broker delivered under 99%.
-# CLIENTS_OFFLINE and DIVERGED stay separate from both.
+# SATURATED_VALID when the generator kept up and delivery is more than 0.02
+# below (1 - offline): the broker, not the clients that were offline.
+# A smaller gap with offline clients is CLIENTS_OFFLINE on every broker.
 emit_cell_summary() {
   python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY' || echo "CELL $1 broker=$2 offered/attempted=$3/0.0 FAILED SATURATED"
 import json, sys
 from pathlib import Path
+sys.path.insert(0, "experiments")
+from validity import broker_saturated, loss_explained_by_offline
 run_id, broker, nominal_s, shards_s, rooms_s, failed_s = sys.argv[1:7]
 nominal = float(nominal_s)
 expected = min(int(rooms_s), int(shards_s))
@@ -100,22 +103,23 @@ clients_not_converged = sum(int(s.get("clientsNotConverged", 0)) for s in summar
 missing = len(paths) < expected
 offline_frac = skipped / (sent + skipped) if (sent + skipped) else 0.0
 delivery_ratio = min(ratios) if ratios else 0.0
-generator_short = nominal > 0 and attempted < 0.99 * nominal
-# Generator kept up, clients were online, broker did not deliver: a measured saturation
-# point, not a harness failure. Pubsub loss under faults is divergence (no replay).
-broker_saturated = (
-    bool(ratios) and delivery_ratio < 0.99 and offline_frac <= 0.05
-    and not generator_short and not missing and broker != "pubsub"
+attempted_ratio = (attempted / nominal) if nominal > 0 else 1.0
+generator_short = nominal > 0 and attempted_ratio < 0.99
+# Same predicate as experiments/validity.py: delivery vs (1 - offline) - 0.02, every broker.
+saturated = (
+    bool(ratios) and not missing
+    and broker_saturated(delivery_ratio, offline_frac, attempted_ratio)
 )
+explained = bool(ratios) and loss_explained_by_offline(delivery_ratio, offline_frac)
 if missing or generator_short:
     flags.append("SATURATED")
-elif broker_saturated:
+elif saturated:
     flags.append("SATURATED_VALID")
-if offline_frac > 0.05:
+if offline_frac > 0.05 or explained:
     flags.append("CLIENTS_OFFLINE")
 if rooms_diverged > 0:
     flags.append("DIVERGED")
-if ratios and delivery_ratio < 0.99:
+if ratios and delivery_ratio < 0.99 and not saturated and not explained:
     flags.append("CENSORED")
 if missing:
     flags.append(f"shards={len(paths)}/{expected}")

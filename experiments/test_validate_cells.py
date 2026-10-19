@@ -136,12 +136,78 @@ def test_streams_b_l5000_passes():
 
 def test_offline_clients_do_not_censor_a_fault_cell():
     obs = pubsub_c()
-    obs.delivery_ratio = 0.80
+    # 0.87 sits inside 0.02 of (1 - 0.12) = 0.88, so the shortfall is the offline clients.
+    obs.delivery_ratio = 0.87
     obs.offline_fraction = 0.12
     verdict = assess_cell(obs)
     assert verdict.status == "PASS"
-    assert "CENSORED" in verdict.flags
+    assert "CENSORED" not in verdict.flags
     assert "CENSORED" not in verdict.failures
+    assert "CLIENTS_OFFLINE" in verdict.flags
+
+
+def test_delivery_far_below_online_clients_is_saturated_valid():
+    """20261019T085759Z-7e40e22 cell 003: delivery 0.018, offline 0.314, attempted 0.999.
+
+    p50 66s and p99 200s are not a plateau. The same gap on pubsub is saturation too.
+    """
+    def cell(broker: str) -> CellObservation:
+        return CellObservation(
+            run_id=f"003-C-{broker}-L5000-nu1-k1-r0",
+            stage="C", broker=broker, load=5000, nu=1, kill=1,
+            offered_per_sec=5000, attempted_per_sec=4995,
+            delivery_ratio=0.018, offline_fraction=0.314,
+            rooms_diverged=50, rooms_total=50,
+            clients_connected=1000, clients_expected=1000,
+            p50_ms=66_000, p75_ms=120_000, p99_ms=200_000,
+            hdr_p50_ms=66_000, reservoir_p50_ms=66_000,
+            sample_span_ms=50_000, duration_s=60,
+            sample_count=1_000, hdr_count=50_000,
+        )
+    for broker in ("kafka", "pubsub"):
+        verdict = assess_cell(cell(broker))
+        assert verdict.status == "SATURATED_VALID", broker
+        assert verdict.failures == [], broker
+        assert "CLIENTS_OFFLINE" in verdict.flags, broker
+        assert "DIVERGED" in verdict.flags, broker
+        assert "CENSORED" not in verdict.flags, broker
+        assert "PLATEAU" not in verdict.flags, broker
+        assert record_cell(empty_state(), verdict, fail_fast=True) == 0
+
+
+def test_offline_explained_loss_is_clients_offline_for_every_broker():
+    """kafka-tuned and pubsub at delivery 0.960, offline 0.033 are the same class.
+
+    Expected delivery is 0.967. 0.960 is inside the 0.02 tolerance, so this is
+    CLIENTS_OFFLINE, not SATURATED_VALID.
+    """
+    def cell(broker: str) -> CellObservation:
+        return CellObservation(
+            run_id=f"020-C-{broker}-L2500-nu1-k0-r0",
+            stage="C", broker=broker, load=2500, nu=1,
+            offered_per_sec=2500, attempted_per_sec=2490,
+            delivery_ratio=0.960, offline_fraction=0.033,
+            rooms_diverged=0, rooms_total=25,
+            clients_connected=500, clients_expected=500,
+            p50_ms=40, p75_ms=80, p99_ms=150,
+            hdr_p50_ms=40, reservoir_p50_ms=42,
+            sample_span_ms=55_000, duration_s=60,
+            sample_count=20_000, hdr_count=1_000_000,
+        )
+    for broker in ("kafka-tuned", "pubsub"):
+        verdict = assess_cell(cell(broker))
+        assert verdict.status == "PASS", broker
+        assert verdict.failures == [], broker
+        assert "CLIENTS_OFFLINE" in verdict.flags, broker
+        assert "CENSORED" not in verdict.flags, broker
+
+
+def test_delivery_on_the_offline_floor_is_not_saturated():
+    obs = pubsub_c()
+    obs.offline_fraction = 0.033
+    obs.delivery_ratio = (1 - 0.033) - 0.02
+    verdict = assess_cell(obs)
+    assert verdict.status == "PASS"
     assert "CLIENTS_OFFLINE" in verdict.flags
 
 
@@ -236,10 +302,11 @@ def test_smoke_20261019_cells():
     assert assess_cell(acks).status == "PASS"
     assert assess_cell(plain_c).status == "PASS"
     fault = assess_cell(tuned_fault)
-    assert fault.status == "PASS"
+    # 0.704 is below (1 - 0.271) - 0.02 = 0.709, so the gap is the broker plus the offline clients.
+    assert fault.status == "SATURATED_VALID"
     assert "CLIENTS_OFFLINE" in fault.flags
     assert "DIVERGED" in fault.flags
-    assert "CENSORED" in fault.flags
+    assert "CENSORED" not in fault.flags
     diverged = assess_cell(pubsub)
     assert diverged.status == "PASS"
     assert "DIVERGED" in diverged.flags
