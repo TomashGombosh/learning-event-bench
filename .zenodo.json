@@ -1,0 +1,36 @@
+{
+  "title": "learning-event-bench: benchmark of event delivery and CRDT convergence for interactive learning tools (Redis Pub/Sub, Redis Streams, Apache Kafka)",
+  "upload_type": "software",
+  "description": "This benchmark harness measures event delivery and CRDT convergence for interactive learning tools. Socket.IO gateways host Yjs CRDT rooms and move operations over Redis Pub/Sub, Redis Streams, or Apache Kafka, while a validity gate separates harness faults from broker saturation. The AWS Graviton test stand is provisioned with Terraform and driven by GitHub Actions. It accompanies an article submitted to Visnyk of Uzhhorod University (Series of Mathematics and Informatics), vol. 50; the full run is 20261019T134042Z-b1b452c at commit b1b452c.",
+  "creators": [
+    {
+      "name": "Hombosh, Tomash",
+      "affiliation": "Uzhhorod National University",
+      "orcid": "0009-0006-6282-7689"
+    },
+    {
+      "name": "Mulesa, Pavlo",
+      "affiliation": "Uzhhorod National University",
+      "orcid": "0000-0002-3437-8082"
+    }
+  ],
+  "keywords": [
+    "event streaming",
+    "Redis Streams",
+    "Apache Kafka",
+    "Redis Pub/Sub",
+    "CRDT",
+    "Yjs",
+    "benchmark",
+    "interactive learning tools",
+    "reliability"
+  ],
+  "access_right": "open",
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/TomashGombosh/learning-event-bench",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
+}
