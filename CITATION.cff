@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it using the metadata in this file.
+type: software
+title: "learning-event-bench: benchmark of event delivery and CRDT convergence for interactive learning tools (Redis Pub/Sub, Redis Streams, Apache Kafka)"
+authors:
+  - family-names: Hombosh
+    given-names: Tomash
+    affiliation: Uzhhorod National University
+    orcid: https://orcid.org/0009-0006-6282-7689
+  - family-names: Mulesa
+    given-names: Pavlo
+    affiliation: Uzhhorod National University
+    orcid: https://orcid.org/0000-0002-3437-8082
+repository-code: https://github.com/TomashGombosh/learning-event-bench
+license: MIT

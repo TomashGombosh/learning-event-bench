@@ -116,5 +116,9 @@ See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Ac
   produced by disconnects and gateway failures (see the reliability model).
 - Latency of re-sent outbox operations is measured from their original scheduled time (time-to-visibility).
 
+## Citing
+
+Author and repository metadata are in [`CITATION.cff`](CITATION.cff). Zenodo deposit metadata is in [`.zenodo.json`](.zenodo.json). The DOI will appear here after the first Zenodo release.
+
 ## License
 MIT
