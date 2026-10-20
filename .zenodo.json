@@ -26,6 +26,7 @@
     "reliability"
   ],
   "access_right": "open",
+  "license": "mit",
   "related_identifiers": [
     {
       "identifier": "https://github.com/TomashGombosh/learning-event-bench",
