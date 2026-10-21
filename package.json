@@ -2,7 +2,7 @@
   "name": "learning-event-bench",
   "version": "0.1.0",
   "private": true,
-  "description": "Experimental stand: latency and reliability of Redis Pub/Sub, Redis Streams and Apache Kafka for Yjs-based interactive learning sessions",
+  "description": "Experimental stand: latency and reliability of Redis Pub/Sub, Redis Streams and Apache Kafka for Yjs CRDT and ShareDB OT learning sessions",
   "license": "MIT",
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -11,7 +11,8 @@
     "test:unit": "jest test/unit test/architecture",
     "test:contract": "jest test/contract",
     "gateway": "tsx apps/gateway/main.ts",
-    "loadgen": "tsx apps/load-generator/main.ts"
+    "loadgen": "tsx apps/load-generator/main.ts",
+    "complexity": "node scripts/adapter-complexity.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.4",
@@ -19,20 +20,30 @@
     "@nestjs/platform-express": "^10.4.22",
     "@nestjs/platform-socket.io": "^10.4.4",
     "@nestjs/websockets": "^10.4.4",
+    "@teamwork/websocket-json-stream": "^2.0.0",
     "hdr-histogram-js": "^3.0.0",
     "ioredis": "^5.4.1",
     "kafkajs": "^2.2.4",
+    "ot-json0": "^1.1.0",
+    "pg": "^8.23.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "sharedb": "^6.0.5",
+    "sharedb-postgres": "^6.0.0",
+    "sharedb-redis-pubsub": "^6.0.0",
     "socket.io": "^4.8.0",
     "socket.io-client": "^4.8.0",
     "tsx": "^4.19.1",
+    "ws": "^8.22.0",
     "yjs": "^13.6.19",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/jest": "^29.5.13",
     "@types/node": "^20.16.10",
+    "@types/ws": "^8.18.2",
+    "@typescript-eslint/parser": "^8.72.0",
+    "eslint": "^10.13.0",
     "jest": "^29.7.0",
     "ts-jest": "^29.2.5",
     "typescript": "^5.6.2"

@@ -31,6 +31,16 @@ describe('load generator building blocks', () => {
     expect(arrivals.every((t, i) => i === 0 || t >= arrivals[i - 1])).toBe(true);
   });
 
+  it('Yjs state metadata is the encoded document beyond the visible text', () => {
+    const replica = new YjsReplica(seededRandom(6));
+    replica.editRandomly();
+    replica.editRandomly();
+    const stats = replica.stateStats();
+    expect(stats.textBytes).toBeGreaterThan(0);
+    expect(stats.stateBytes).toBeGreaterThan(stats.textBytes);
+    expect(stats.metadataBytes).toBe(stats.stateBytes - stats.textBytes);
+  });
+
   it('Yjs replicas converge when all updates are delivered and diverge when one is lost', () => {
     const a = new YjsReplica(seededRandom(3));
     const b = new YjsReplica(seededRandom(4));

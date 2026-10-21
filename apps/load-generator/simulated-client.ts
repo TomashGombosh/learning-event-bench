@@ -190,6 +190,10 @@ export class SimulatedClient {
     return this.online;
   }
 
+  stateStats(): { textBytes: number; stateBytes: number; metadataBytes: number } {
+    return this.replica.stateStats();
+  }
+
   digest(): ReplicaDigest {
     for (let i = 0; i < this.ownPayloads.length; i++) this.replica.queueRemote(this.ownPayloads[i]);
     this.ownPayloads = [];
