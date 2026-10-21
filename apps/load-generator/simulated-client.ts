@@ -4,6 +4,13 @@ import { EventCategory } from '@domain/event-category';
 import { latencyOf } from '@domain/latency';
 import { ReplicaDigest } from '@domain/reliability';
 import { CatchUpResult } from '@application/use-cases/catch-up.use-case';
+
+/** Cursor to store after a join ack. An empty page keeps the tail cursor from the first join. */
+export function cursorAfterJoin(current: string | null, result: CatchUpResult): string | null {
+  if (!result.supported) return current;
+  if (result.missed.length > 0) return result.missed[result.missed.length - 1].id;
+  return result.cursor ?? current;
+}
 import { preciseNowMs } from './clock';
 import { ConnectGate, FailoverState, initialFailover, noteFailure, pickGateway } from './gateway-failover';
 import { LatencyRecorder } from './latency-recorder';
@@ -183,6 +190,10 @@ export class SimulatedClient {
     return this.online;
   }
 
+  stateStats(): { textBytes: number; stateBytes: number; metadataBytes: number } {
+    return this.replica.stateStats();
+  }
+
   digest(): ReplicaDigest {
     for (let i = 0; i < this.ownPayloads.length; i++) this.replica.queueRemote(this.ownPayloads[i]);
     this.ownPayloads = [];
@@ -256,9 +267,9 @@ export class SimulatedClient {
     }
     for (const stored of result.missed) {
       if (stored.event.clientId !== this.clientId) this.replica.queueRemote(stored.event.payload);
-      this.lastSeenId = stored.id;
       this.counters.catchUpEvents++;
     }
+    this.lastSeenId = cursorAfterJoin(this.lastSeenId, result);
     return result.truncated;
   }
 

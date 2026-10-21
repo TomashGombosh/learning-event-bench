@@ -22,6 +22,9 @@ Add --dry-run after the arguments to validate and print the plan without writing
 
 The first cell of each broker x scenario is the risky one (highest load, faults on).
 Full and kafka-rerun runs abort if that cell fails the validity gate.
+
+Every row has a scheme column (default yjs). This factorial is not crossed with
+ShareDB; that plan is experiments/make_csa_matrix.py.
 """
 from __future__ import annotations
 
@@ -38,10 +41,14 @@ def rooms_for(load: float) -> int:
     return int(load / (CLIENTS * RATE))
 
 
-def row(stage, broker, load, nu, kill, rep):
+# The original factorial stays Yjs. The scheme × transport cross is make_csa_matrix.py.
+SCHEMES = ("yjs",)
+
+
+def row(stage, broker, load, nu, kill, rep, scheme=None):
     return dict(
         stage=stage, broker=broker, load=load, rooms=rooms_for(load), clients=CLIENTS, rate=RATE,
-        disconnects_per_min=nu, gateway_kill=kill, rep=rep,
+        disconnects_per_min=nu, gateway_kill=kill, rep=rep, scheme=scheme or SCHEMES[0],
     )
 
 
@@ -215,8 +222,16 @@ def plan_for(argument: str, spec: str = "") -> tuple[str, list[dict]]:
     return "factorial", factorial_rows(int(argument))
 
 
+# scheme is last so a header-less reader of an older file still sees run_id in the last column.
+COLUMNS = [
+    "stage", "broker", "load", "rooms", "clients", "rate",
+    "disconnects_per_min", "gateway_kill", "rep", "run_id", "scheme",
+]
+
+
 def write_matrix(rows: list[dict], path: str) -> None:
     for i, item in enumerate(rows):
+        item.setdefault("scheme", "yjs")
         if item.get("run_id"):
             continue  # cells profile: keep the id of the run being replaced
         item["run_id"] = (
@@ -224,7 +239,7 @@ def write_matrix(rows: list[dict], path: str) -> None:
             f"-nu{item['disconnects_per_min']}-k{item['gateway_kill']}-r{item['rep']}"
         )
     with open(path, "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()), lineterminator="\n")
+        writer = csv.DictWriter(handle, fieldnames=COLUMNS, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 

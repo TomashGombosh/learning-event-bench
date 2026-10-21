@@ -3,9 +3,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends iproute2 && rm 
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
-COPY tsconfig.json ./
+COPY tsconfig.json jest.config.js ./
 COPY src ./src
 COPY apps ./apps
+COPY test ./test
+COPY infra/postgres ./infra/postgres
 COPY infra/netem-entrypoint.sh /usr/local/bin/netem-entrypoint.sh
 RUN chmod +x /usr/local/bin/netem-entrypoint.sh
 ENV NODE_ENV=production

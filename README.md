@@ -45,6 +45,10 @@ enforced by `test/architecture/dependency-rule.test.ts`.
 4. Receivers apply the Yjs update and record `T = received − scheduled` (same process clock, no clock skew).
 5. On reconnect a client sends its last seen event id; `CatchUpAfterReconnectUseCase` replays missed events
    (Redis Streams: `XRANGE`; Kafka: short-lived consumer seeking the room partition; Pub/Sub: unsupported).
+   A first join sends null. The gateway does not page the log (that opened a Kafka consumer group per
+   client). It returns the current tail id as `cursor`. The client stores that id, so an outage before
+   any live event still has a cursor and the events after it are replayed. An empty log's cursor is the
+   start of the log (`0` in memory, `0-0` on Streams, `${partition}--1` on Kafka).
 6. Clients keep an outbox of unacknowledged operations and re-send them after reconnecting
    (Yjs updates are idempotent, so duplicates are harmless). Each client starts on
    `hash(clientId) % N` of `GATEWAY_URLS`. A dropped session leaves that URL for 30 s
@@ -52,6 +56,55 @@ enforced by `test/architecture/dependency-rule.test.ts`.
    gateways, with a cap of 32 handshakes in flight, until one accepts.
 7. At the end, every replica reports a SHA-256 digest of its text. A room has diverged if those digests
    disagree, or if any of its clients is offline (`clients_lost`). See the definition of R above.
+   `rooms.csv` and `replicas.csv` use the same columns for Yjs and ShareDB.
+
+### Operational Transformation (ShareDB)
+
+`SCHEME=sharedb` runs ShareDB (MIT) with the json0 text type (`{text: ""}`) instead of Yjs.
+The ShareDB server is the gateway. Simulated clients use `sharedb/lib/client` on a websocket at
+`/sharedb` on the same gateway port. **The default OT component is one shared Postgres database
+(`sharedb-postgres`) for every gateway.** Docker Compose starts that database and applies
+`infra/postgres/structure.sql`. Catch-up is `subscribe` / `fetch` against that op log. It is not a
+Redis `XRANGE` or a Kafka replay. When a gateway sees a pubsub op whose version skips ahead, it
+reads the missing ops from Postgres and forwards them locally before the newer one.
+`OT_DB=memory` is the per-gateway `MemoryDB` ablation: that process has no other copy of an op, so
+a missed pubsub message stays missing. The ablation still projects ops into its local log.
+
+Inter-gateway propagation is a ShareDB PubSub: `sharedb-redis-pubsub` for Redis Pub/Sub, and
+in-tree adapters for Redis Streams and Kafka (KafkaJS, the same producer settings as the Yjs
+transport, including `kafka-tuned`: acks=1, idempotent off). Those adapters start at the tail.
+`BROKER=memory` is in-process only and does not cross gateway processes. `SCHEME=sharedb` does
+not also start the Yjs broker.
+
+Timing rides in ShareDB `x.source` (`scheduledAtMs`, `sentAtMs`, `clientId`). Service latency is
+`received − sentAtMs` on the sender's clock. Ops applied before the subscribe callback are
+catch-up and are not latency samples. A reconnect uses `bindToSocket`, so an unacknowledged op
+keeps its `src`/`seq` and is not submitted again.
+
+`summary.json` `resources` still records load-generator process CPU. The cell line
+`cpu_s_per_1000` prefers `results/<run>/cpu_samples.csv` (the PR #21 sampler: one row per second
+per container, cgroup `usage_usec`, positive deltas summed, `cpu_source=containers`). A cell with
+no sample file falls back to the load-generator process (`cpu_source=loadgen`). State metadata
+bytes are Yjs document state minus the UTF-8 text, or the Postgres op-log JSON minus inserted
+characters (`GET /bench/state`) plus client text. `npm run complexity` prints LOC
+(no tests, no comments) and ESLint cyclomatic complexity per adapter directory. The Redis Pub/Sub
+OT adapter is the npm package `sharedb-redis-pubsub`, so it has no in-tree LOC.
+
+### CSA matrix (scheme × transport)
+
+`experiments/csa_profiles.py` is the only place the three provisional profiles are defined:
+whiteboard n=20, 5 events/s/user, L=2500; quiz n=30, 0.2 events/s/user; class chat n=50,
+0.5 events/s/user. The cross is 6 alternatives (Yjs, ShareDB) × (Pub/Sub, Streams, Kafka-tuned)
+× 3 profiles × 2 fault levels (ν=0; ν=1/min and a gateway kill) × 5 reps = 180 cells, seed
+`20261021`. Smoke is 12 cells (whiteboard, one rep, both fault levels). Both CSA modes set
+`VALIDITY_FAIL_FAST=1`. The generator exits before writing a plan that is internally
+inconsistent, and it exits if `run_matrix.sh` no longer emits the `SATURATED` flag.
+
+```bash
+python3 experiments/make_csa_matrix.py smoke    # 12 cells, or `full` for 180
+./experiments/run_csa.sh smoke                  # writes the plan, then run_matrix.sh
+npm run complexity
+```
 
 ## Quick start (no Docker)
 
@@ -96,6 +149,8 @@ See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Ac
 
 | Component | Variable | Default | Meaning |
 |---|---|---|---|
+| gateway | `SCHEME` | `yjs` | `yjs` or `sharedb`. ShareDB does not start the Yjs broker |
+| gateway | `OT_DB` | `postgres` | Shared op log. `memory` is the per-gateway ablation |
 | gateway | `BROKER` | `memory` | `memory`, `pubsub`, `streams`, `kafka` (acks=all, idempotent), `kafka-tuned` (acks=1), `kafka-acks` (acks=all, not idempotent) |
 | gateway | `STREAM_MAXLEN` | `10000` | Redis Streams replay window *L* |
 | gateway | `KAFKA_PARTITIONS` | `12` | partitions of topic `collab-events` |
@@ -115,6 +170,8 @@ See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Ac
 - WebSocket runs over TCP, so `netem` packet loss turns into delay rather than lost events; divergence is
   produced by disconnects and gateway failures (see the reliability model).
 - Latency of re-sent outbox operations is measured from their original scheduled time (time-to-visibility).
+- ShareDB pubsub adapters start at the tail. With `OT_DB=postgres` a missed version is read back from the shared op log. With `OT_DB=memory` (the ablation) a missed pubsub message is gone. A killed gateway is not restarted.
+- CPU seconds are the load-generator process, not the gateway processes. Quiz and class-chat aggregate loads are provisional (`experiments/csa_profiles.py`).
 
 ## Citing
 

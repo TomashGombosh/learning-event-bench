@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from validity import (
     assess_cell,
+    group_key,
     load_observation,
     load_state,
     record_cell,
@@ -38,6 +39,7 @@ def main() -> int:
     parser.add_argument("--run-id", default="")
     parser.add_argument("--stage", default="")
     parser.add_argument("--broker", default="")
+    parser.add_argument("--scheme", default="", help="yjs or sharedb; empty keeps the stage|broker group")
     parser.add_argument("--load", type=float, default=0)
     parser.add_argument("--nu", type=float, default=0)
     parser.add_argument("--kill", type=int, default=0)
@@ -76,11 +78,12 @@ def main() -> int:
         shards=args.shards,
     )
     verdict = assess_cell(obs, catchup_error_max=args.catchup_max)
-    code = record_cell(state, verdict, fail_fast=args.fail_fast)
+    code = record_cell(state, verdict, fail_fast=args.fail_fast, scheme=args.scheme)
     path.write_text(json.dumps(state, indent=2) + "\n")
     print(verdict.line())
     if code == 42:
-        print(f"VALIDITY_ABORT group={verdict.stage}|{verdict.broker} cell={verdict.run_id} reason={state['reason']}")
+        group = group_key(verdict.stage, verdict.broker, args.scheme)
+        print(f"VALIDITY_ABORT group={group} cell={verdict.run_id} reason={state['reason']}")
     return code
 
 
