@@ -13,6 +13,9 @@ x-gateway: &gateway
   pull_policy: never
   environment:
     BROKER: ${BROKER:-streams}
+    SCHEME: ${SCHEME:-yjs}
+    OT_DB: ${OT_DB:-memory}
+    DATABASE_URL: ${DATABASE_URL:-}
     REDIS_URL: redis://redis:6379
     KAFKA_BROKERS: kafka:9092
     KAFKA_PARTITIONS: ${KAFKA_PARTITIONS:-12}

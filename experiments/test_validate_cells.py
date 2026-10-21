@@ -228,6 +228,19 @@ def harness_short_rate() -> CellObservation:
     return cell
 
 
+def test_scheme_is_its_own_fail_fast_group():
+    yjs = empty_state()
+    sharedb = empty_state()
+    verdict = assess_cell(harness_short_rate())
+    assert record_cell(yjs, verdict, fail_fast=True, scheme="yjs") == 42
+    assert record_cell(sharedb, verdict, fail_fast=True, scheme="sharedb") == 42
+    assert "yjs" in yjs["reason"] and "sharedb" in sharedb["reason"]
+    again = assess_cell(harness_short_rate())
+    again.run_id = "same-group-later"
+    assert record_cell(yjs, again, fail_fast=True, scheme="yjs") == 1
+    assert yjs["aborted"] is True
+
+
 def test_fail_fast_stops_only_on_a_harness_fault():
     state = empty_state()
     assert record_cell(state, assess_cell(kafka_b_l5000()), fail_fast=True) == 0

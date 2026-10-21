@@ -124,11 +124,31 @@ if ratios and delivery_ratio < 0.99 and not saturated and not explained:
 if missing:
     flags.append(f"shards={len(paths)}/{expected}")
 suffix = (" " + " ".join(flags)) if flags else ""
+
+def resource_suffix(items):
+    cpu_seconds = events = client_meta = 0.0
+    server_meta = 0.0
+    saw = False
+    for summary in items:
+        resources = summary.get("resources") or {}
+        if "cpuSeconds" not in resources and "stateMetadataBytes" not in resources:
+            continue
+        saw = True
+        cpu_seconds += float(resources.get("cpuSeconds") or 0)
+        events += float(resources.get("events") or 0)
+        client_meta += float(resources.get("metadataBytes") or 0)
+        server_meta = max(server_meta, float(resources.get("serverMetadataBytes") or 0))
+    if not saw:
+        return ""
+    per_thousand = (cpu_seconds * 1000 / events) if events else 0.0
+    return f" cpu_s_per_1000={per_thousand:.4f} metadata_bytes={client_meta + server_meta:.0f}"
+
 print(
     f"CELL {run_id} broker={broker} offered/attempted={nominal:.1f}/{attempted:.1f} "
     f"delivery_ratio={delivery_ratio:.3f} offline_frac={offline_frac:.3f} "
     f"p50={p50:.1f} p99={p99:.1f} rooms_diverged={rooms_diverged} "
     f"clients_lost={clients_lost} clients_not_converged={clients_not_converged}{suffix}"
+    f"{resource_suffix(summaries)}"
 )
 PY
 }
@@ -141,7 +161,7 @@ topic_gone() {
   if [ "$rc" -ne 0 ]; then
     return 2
   fi
-  if printf '%s\n' "$listing" | grep -qx collab-events; then
+  if printf '%s\n' "$listing" | grep -Eqx 'collab-events|sharedb-ops'; then
     return 1
   fi
   return 0
@@ -171,6 +191,9 @@ prepare_brokers() {
     docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh \
       --bootstrap-server localhost:9092 --delete --topic collab-events \
       </dev/null >/dev/null 2>&1 || true
+    docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh \
+      --bootstrap-server localhost:9092 --delete --topic sharedb-ops \
+      </dev/null >/dev/null 2>&1 || true
     for i in $(seq 1 20); do
       status=0
       topic_gone || status=$?
@@ -186,7 +209,7 @@ prepare_brokers() {
       sleep 0.25
     done
   done
-  echo "topic collab-events still present after delete; recreating the stack" >&2
+  echo "topic collab-events or sharedb-ops still present after delete; recreating the stack" >&2
   brokers_ready=0
   docker compose down -v --remove-orphans </dev/null >/dev/null 2>&1 || true
   return 1
@@ -233,18 +256,17 @@ cleanup() {
 trap cleanup EXIT
 expected_cells=$(tail -n +2 "$MATRIX" | grep -c . || true)
 
-while IFS=, read -r stage broker load rooms clients rate nu kill rep run_id <&3; do
-  # make_matrix used to write CRLF; a trailing CR becomes part of the directory name.
-  stage=${stage%$'\r'}; broker=${broker%$'\r'}; load=${load%$'\r'}; rooms=${rooms%$'\r'}
-  clients=${clients%$'\r'}; rate=${rate%$'\r'}; nu=${nu%$'\r'}; kill=${kill%$'\r'}
-  rep=${rep%$'\r'}; run_id=${run_id%$'\r'}
+# Header-aware. An older matrix has no scheme column; those rows are yjs.
+while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id scheme <&3; do
   if [ -z "$run_id" ]; then
     continue
   fi
+  scheme=${scheme:-yjs}
   executed=$((executed + 1))
   if cell_complete "$run_id" "$rooms"; then echo "skip $run_id"; continue; fi
   echo "=== $run_id ($(date -Is))"
   export BROKER=$broker
+  export SCHEME=$scheme
   rm -rf "results/$run_id"
   mkdir -p "results/$run_id"
   if prepare_brokers; then
@@ -286,7 +308,7 @@ while IFS=, read -r stage broker load rooms clients rate nu kill rep run_id <&3;
     (
       timeout -k 20s "$CELL_TIMEOUT_S" \
         docker compose --profile load run --rm --pull never -T \
-        -e RUN_ID="$run_id" -e BROKER_LABEL="$broker" -e ROOMS="$rooms" -e CLIENTS_PER_ROOM="$clients" \
+        -e RUN_ID="$run_id" -e BROKER_LABEL="$broker" -e SCHEME="$scheme" -e ROOMS="$rooms" -e CLIENTS_PER_ROOM="$clients" \
         -e RATE_PER_CLIENT="$rate" -e DISCONNECTS_PER_MIN="$nu" -e MEAN_OFFLINE_S=2 \
         -e WARMUP_S="$WARMUP_S" -e DURATION_S="$DURATION_S" -e DRAIN_S="$DRAIN_S" \
         -e SHARD_INDEX="$s" -e SHARD_COUNT="$SHARDS" -e SEED="$((1000 + rep))" \
@@ -326,7 +348,7 @@ while IFS=, read -r stage broker load rooms clients rate nu kill rep run_id <&3;
   fi
   gate_rc=0
   python3 experiments/validate_cells.py --cell --results results \
-    --run-id "$run_id" --stage "$stage" --broker "$broker" --load "$load" \
+    --run-id "$run_id" --stage "$stage" --broker "$broker" --scheme "$scheme" --load "$load" \
     --nu "$nu" --kill "$kill" --rooms "$rooms" --clients "$clients" --shards "$SHARDS" \
     --catchup-max "$VALIDITY_CATCHUP_ERROR_MAX" \
     "${fail_fast_args[@]}" || gate_rc=$?
@@ -343,4 +365,15 @@ while IFS=, read -r stage broker load rooms clients rate nu kill rep run_id <&3;
     failed_cells+=("$run_id")
     continue
   fi
-done 3< <(tail -n +2 "$MATRIX")
+done 3< <(python3 - "$MATRIX" <<'PY'
+import csv, sys
+fields = ["stage", "broker", "load", "rooms", "clients", "rate", "disconnects_per_min", "gateway_kill", "rep", "run_id"]
+with open(sys.argv[1], newline="") as handle:
+    for row in csv.DictReader(handle):
+        values = [(row.get(name) or "").strip().strip("\r") for name in fields]
+        scheme = (row.get("scheme") or "yjs").strip().strip("\r") or "yjs"
+        if not values[-1]:
+            continue
+        print("\t".join(values + [scheme]))
+PY
+)

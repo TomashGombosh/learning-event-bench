@@ -16,6 +16,24 @@ def _has(rows, stage, broker, load, nu=None):
     )
 
 
+def test_scheme_stays_yjs_so_the_factorial_is_not_doubled():
+    rows = make_matrix.smoke_rows()
+    assert len(rows) == 17
+    assert {r["scheme"] for r in rows} == {"yjs"}
+    assert make_matrix.SCHEMES == ("yjs",)
+    full = make_matrix.factorial_rows(1)
+    assert {r["scheme"] for r in full} == {"yjs"}
+
+
+def test_write_matrix_appends_scheme(tmp_path):
+    rows = make_matrix.smoke_rows()
+    out = tmp_path / "m.csv"
+    make_matrix.write_matrix(rows, str(out))
+    header = out.read_text().splitlines()[0].split(",")
+    assert header[-1] == "scheme"
+    assert "run_id" in header and header.index("run_id") < header.index("scheme")
+
+
 def test_smoke_covers_the_risky_configs():
     rows = make_matrix.smoke_rows()
     assert len(rows) == 17
