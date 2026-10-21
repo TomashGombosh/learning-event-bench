@@ -45,6 +45,10 @@ enforced by `test/architecture/dependency-rule.test.ts`.
 4. Receivers apply the Yjs update and record `T = received − scheduled` (same process clock, no clock skew).
 5. On reconnect a client sends its last seen event id; `CatchUpAfterReconnectUseCase` replays missed events
    (Redis Streams: `XRANGE`; Kafka: short-lived consumer seeking the room partition; Pub/Sub: unsupported).
+   A first join sends null. The gateway does not page the log (that opened a Kafka consumer group per
+   client). It returns the current tail id as `cursor`. The client stores that id, so an outage before
+   any live event still has a cursor and the events after it are replayed. An empty log's cursor is the
+   start of the log (`0` in memory, `0-0` on Streams, `${partition}--1` on Kafka).
 6. Clients keep an outbox of unacknowledged operations and re-send them after reconnecting
    (Yjs updates are idempotent, so duplicates are harmless). Each client starts on
    `hash(clientId) % N` of `GATEWAY_URLS`. A dropped session leaves that URL for 30 s

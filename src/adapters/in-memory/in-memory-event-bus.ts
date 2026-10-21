@@ -28,6 +28,12 @@ export class InMemoryEventBus implements EventBusPort, ReplayableEventLogPort {
     return limit === undefined ? slice : slice.slice(0, limit);
   }
 
+  /** Empty log is `"0"`, which `readAfter` treats as "before the first event". */
+  async tailId(roomId: string): Promise<EventId> {
+    const log = this.logOf(roomId);
+    return log.length === 0 ? '0' : log[log.length - 1].id;
+  }
+
   async close(): Promise<void> {
     this.handlers.clear();
   }

@@ -52,6 +52,11 @@ export class RedisStreamsEventBus implements EventBusPort, ReplayableEventLogPor
     return { unsubscribe: async () => void this.handlers.get(roomId)?.delete(handler) };
   }
 
+  /** `'0-0'` when the stream has no entries; exclusive `XRANGE` then returns later ids. */
+  async tailId(roomId: string): Promise<EventId> {
+    return this.latestId(roomId);
+  }
+
   async readAfter(roomId: string, lastId: EventId | null, limit?: number): Promise<StoredEvent[]> {
     const start = lastId === null ? '-' : `(${lastId}`;
     const key = roomStreamKey(roomId);

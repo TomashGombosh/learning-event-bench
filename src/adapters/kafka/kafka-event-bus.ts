@@ -151,6 +151,17 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
    * Recent catch-up is a slice of the live consumer's ring (no extra group join).
    * `consumeRange` runs only when that ring does not cover the requested offset.
    */
+  /**
+   * High watermark minus one. An empty partition returns `${partition}--1`,
+   * so the next `readAfter` starts at offset 0 without a consumer group.
+   */
+  async tailId(roomId: string): Promise<EventId> {
+    const partition = partitionOf(roomId, this.partitions);
+    const offsets = await this.admin.fetchTopicOffsets(this.options.topic);
+    const high = BigInt(offsets.find((entry) => entry.partition === partition)!.high);
+    return kafkaEventId(partition, (high - 1n).toString());
+  }
+
   async readAfter(roomId: string, lastId: EventId | null, limit?: number): Promise<StoredEvent[]> {
     const partition = partitionOf(roomId, this.partitions);
     // Do not compare the ring to the high watermark. Under load the watermark moves
