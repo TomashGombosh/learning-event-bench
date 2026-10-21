@@ -35,4 +35,4 @@ jobs:
           -e KAFKA_BROKERS=kafka:9092
           -e DATABASE_URL=postgres://sharedb:sharedb@postgres:5432/sharedb
           gateway1
-          jest test/contract test/integration --forceExit --testTimeout=120000
+          jest test/contract test/integration --forceExit --runInBand --testTimeout=120000
