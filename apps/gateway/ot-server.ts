@@ -1,11 +1,12 @@
 import type { Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { memoryStateStats, OtStateStats } from '@adapters/sharedb/state-stats';
+import { memoryStateStats, OtStateStats, postgresStateStats } from '@adapters/sharedb/state-stats';
 
 const WebSocketJSONStream = require('@teamwork/websocket-json-stream');
 
 export interface OtStateSource {
   _writeOpSync?: unknown;
+  _pool?: { query(text: string): Promise<{ rows: Array<Record<string, string | number | null>> }> };
   close?: (callback?: (err?: Error | null) => void) => void;
 }
 
@@ -39,12 +40,16 @@ export function attachOtServer(server: Server, backend: { listen(stream: unknown
 
 export function mountOtState(expressApp: { get(path: string, handler: (req: unknown, res: OtResponse) => void): void }, db: OtStateSource): void {
   expressApp.get('/bench/state', (_req, res) => {
-    res.json(otState(db));
+    void otState(db).then((body) => res.json(body)).catch((error: unknown) => {
+      console.error('ot state', error);
+      res.json({ db: 'postgres', docs: 0, textBytes: 0, stateBytes: 0, metadataBytes: null });
+    });
   });
 }
 
-export function otState(db: OtStateSource): OtStateStats {
+export async function otState(db: OtStateSource): Promise<OtStateStats> {
   if (typeof db._writeOpSync === 'function') return memoryStateStats(db as never);
+  if (typeof db._pool?.query === 'function') return postgresStateStats(db);
   return { db: 'postgres', docs: 0, textBytes: 0, stateBytes: 0, metadataBytes: null };
 }
 

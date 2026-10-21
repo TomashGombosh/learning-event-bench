@@ -15,12 +15,9 @@ interface ShareOp {
 }
 
 /**
- * ShareDB's pubsub fans an op out to other servers but does not write it into
- * their database. With the default in-memory DB each gateway has its own op
- * log, so a client that fails over would fetch an empty document.
- * Subscribing to the collection channel and applying ops in version order
- * makes every gateway's op log a projection of the same commits. Client
- * catch-up is `doc.fetch` / `subscribe` against that log, not a transport replay.
+ * Ablation only (`OT_DB=memory`). Each gateway has its own MemoryDB, so a
+ * missed pubsub message is a missed version. The shared Postgres log is the
+ * default: catch-up reads that database, and a version gap is filled from it.
  */
 export function projectRemoteOp(db: MemoryLike, op: ShareOp | null): void {
   if (!op || op.c == null || op.d == null || typeof op.v !== 'number') return;

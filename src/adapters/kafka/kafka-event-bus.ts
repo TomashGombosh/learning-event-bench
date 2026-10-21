@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { groupJoined } from './group-join';
 import { Admin, Consumer, Kafka, logLevel, Producer } from 'kafkajs';
 import { CollabEvent, EventId, StoredEvent } from '@domain/collab-event';
 import { EventBusPort, EventHandler, Subscription } from '@application/ports/event-bus.port';
@@ -112,6 +113,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     const inFlight = this.options.maxInFlight === null ? 'unlimited' : String(this.options.maxInFlight);
     console.log(`producer idempotent=${this.options.idempotent} acks=${this.options.acks} maxInFlight=${inFlight}`);
     await this.consumer.subscribe({ topic: this.options.topic, fromBeginning: false });
+    const joined = groupJoined(this.consumer);
     await this.consumer.run({
       eachBatchAutoResolve: true,
       eachBatch: async ({ batch, heartbeat }) => {
@@ -128,6 +130,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
         if (batch.messages.length > 0) await heartbeat();
       },
     });
+    await joined;
   }
 
   async publish(event: CollabEvent): Promise<EventId> {

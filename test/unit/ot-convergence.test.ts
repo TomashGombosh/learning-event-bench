@@ -2,6 +2,7 @@ import { AddressInfo } from 'node:net';
 import { createServer } from 'node:http';
 import { memoryStateStats } from '@adapters/sharedb/state-stats';
 import { createOtBackend, createOtDatabase } from '@adapters/sharedb/backend';
+import { attachVersionGapRecovery } from '@adapters/sharedb/gap-recovery';
 import { projectRemoteOp } from '@adapters/sharedb/project-ops';
 import { createShareDbPubSub } from '@adapters/sharedb/pubsub-factory';
 import { attachOtServer } from '../../apps/gateway/ot-server';
@@ -13,6 +14,7 @@ import { SharedbClient } from '../../apps/load-generator/sharedb-client';
 import { ClientCounters } from '../../apps/load-generator/simulated-client';
 
 const ShareDB = require('sharedb');
+const ot = require('sharedb/lib/ot');
 const JSON0 = 'http://sharejs.org/types/JSONv0';
 
 function counters(): ClientCounters {
@@ -70,6 +72,45 @@ describe('OT op-log projection', () => {
     });
     expect(docB.data.text).toBe('hi');
     docA.destroy?.();
+  });
+});
+
+describe('shared op log gap recovery', () => {
+  it('fetches the missing version from the database when pubsub skips one', async () => {
+    const db = new ShareDB.MemoryDB();
+    const pubsub = new ShareDB.MemoryPubSub();
+    attachVersionGapRecovery(pubsub, db);
+    const ops = [
+      { c: 'rooms', d: 'r', v: 0, src: 'a', seq: 1, create: { type: JSON0, data: { text: '' } } },
+      { c: 'rooms', d: 'r', v: 1, src: 'a', seq: 2, op: [{ p: ['text', 0], si: 'a' }] },
+      { c: 'rooms', d: 'r', v: 2, src: 'a', seq: 3, op: [{ p: ['text', 1], si: 'b' }] },
+    ];
+    for (const op of ops) {
+      const snapshot = db._getSnapshotSync('rooms', 'r', true);
+      const failed = ot.apply(snapshot, op);
+      expect(failed).toBeUndefined();
+      db._writeOpSync('rooms', 'r', op);
+      db._writeSnapshotSync('rooms', 'r', snapshot);
+    }
+    const seen: number[] = [];
+    await new Promise<void>((resolve, reject) => {
+      pubsub.subscribe('rooms.r', (err: Error | null, stream: { on(event: string, fn: (op: { v: number }) => void): void }) => {
+        if (err) return reject(err);
+        stream.on('data', (op) => seen.push(op.v));
+        resolve();
+      });
+    });
+    pubsub._emit('rooms.r', ops[0]);
+    pubsub._emit('rooms.r', ops[2]);
+    await waitFor(() => seen.length >= 3);
+    expect(seen).toEqual([0, 1, 2]);
+    expect(db._getSnapshotSync('rooms', 'r', false).data.text).toBe('ab');
+  });
+});
+
+describe('OT database selection', () => {
+  it('refuses a shared Postgres log without DATABASE_URL', () => {
+    expect(() => createOtDatabase('postgres')).toThrow(/DATABASE_URL/);
   });
 });
 

@@ -50,3 +50,36 @@ export function memoryStateStats(db: MemoryDb): OtStateStats {
     metadataBytes: Math.max(0, stateBytes - insertedBytes),
   };
 }
+
+interface Queryable {
+  query(text: string): Promise<{ rows: Array<Record<string, string | number | null>> }>;
+}
+
+/** Op-log size in the shared Postgres database. `si` characters count as text, the rest as metadata. */
+export async function postgresStateStats(db: { _pool?: Queryable }): Promise<OtStateStats> {
+  const pool = db._pool;
+  if (!pool) return { db: 'postgres', docs: 0, textBytes: 0, stateBytes: 0, metadataBytes: null };
+  const ops = await pool.query(`
+    SELECT COALESCE(SUM(octet_length(operation::text)), 0) AS state_bytes,
+           COUNT(DISTINCT (collection, doc_id)) AS docs
+    FROM ops`);
+  const inserted = await pool.query(`
+    SELECT COALESCE(SUM(octet_length(elem->>'si')), 0) AS inserted
+    FROM ops
+    CROSS JOIN LATERAL jsonb_array_elements(
+      CASE WHEN jsonb_typeof(operation->'op') = 'array' THEN operation->'op' ELSE '[]'::jsonb END
+    ) AS elem
+    WHERE jsonb_typeof(elem->'si') = 'string'`);
+  const text = await pool.query(`
+    SELECT COALESCE(SUM(octet_length(data->>'text')), 0) AS text_bytes
+    FROM snapshots`);
+  const stateBytes = Number(ops.rows[0]?.state_bytes ?? 0);
+  const insertedBytes = Number(inserted.rows[0]?.inserted ?? 0);
+  return {
+    db: 'postgres',
+    docs: Number(ops.rows[0]?.docs ?? 0),
+    textBytes: Number(text.rows[0]?.text_bytes ?? 0),
+    stateBytes,
+    metadataBytes: Math.max(0, stateBytes - insertedBytes),
+  };
+}

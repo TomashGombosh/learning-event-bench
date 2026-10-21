@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Consumer, Kafka, logLevel, Producer } from 'kafkajs';
 import { kafkaProducerSettings } from '../broker-factory';
+import { groupJoined } from '../kafka/group-join';
 import { partitionOf } from '../kafka/room-partitioner';
 
 const PubSub = require('sharedb/lib/pubsub');
@@ -17,8 +18,8 @@ export interface KafkaPubSubOptions {
  * ShareDB PubSub on one Kafka topic. Producer settings are the same ones the
  * Yjs path records for that broker kind (`acks`, idempotence, in-flight cap).
  * Each gateway uses its own consumer group so it receives every op (broadcast).
- * Ordering is the partition order of the channel key. Clients do not read Kafka;
- * the gateway projects these messages into the ShareDB op log.
+ * Ordering is the partition order of the channel key. Clients do not read Kafka.
+ * The shared Postgres op log is the source of truth; this stream is the live fanout.
  */
 export async function createKafkaPubSub(options: KafkaPubSubOptions): Promise<any> {
   const producerSettings = kafkaProducerSettings(options.kind);
@@ -94,6 +95,7 @@ export async function createKafkaPubSub(options: KafkaPubSubOptions): Promise<an
   const inFlightLabel = maxInFlight === null ? 'unlimited' : String(maxInFlight);
   console.log(`sharedb producer idempotent=${idempotent} acks=${acks} maxInFlight=${inFlightLabel}`);
   await pubsub.consumer.subscribe({ topic, fromBeginning: false });
+  const joined = groupJoined(pubsub.consumer);
   await pubsub.consumer.run({
     eachBatchAutoResolve: true,
     eachBatch: async ({ batch, heartbeat }: { batch: { messages: Array<{ value?: Buffer | null }> }; heartbeat: () => Promise<void> }) => {
@@ -107,6 +109,7 @@ export async function createKafkaPubSub(options: KafkaPubSubOptions): Promise<an
       }
     },
   });
+  await joined;
   return pubsub;
 }
 
