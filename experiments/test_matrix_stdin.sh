@@ -10,6 +10,7 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/experiments/lib" "$tmp/bin" "$tmp/results"
 cp "$root/experiments/run_matrix.sh" "$tmp/experiments/run_matrix.sh"
 cp "$root/experiments/validity.py" "$tmp/experiments/validity.py"
+cp "$root/experiments/sample_cell.py" "$tmp/experiments/sample_cell.py"
 cp "$root/experiments/lib/budget.sh" "$tmp/experiments/lib/budget.sh"
 chmod +x "$tmp/experiments/run_matrix.sh"
 

@@ -1,5 +1,6 @@
 import { latencyOf } from '@domain/latency';
 import { ConnectGate, initialFailover, noteFailure, pickGateway } from '../../apps/load-generator/gateway-failover';
+import { FanoutTracker } from '../../apps/load-generator/fanout-tracker';
 import { LatencyRecorder } from '../../apps/load-generator/latency-recorder';
 import { assessLoad } from '../../apps/load-generator/load-report';
 import { PoissonSchedule } from '../../apps/load-generator/poisson-schedule';
@@ -166,6 +167,26 @@ describe('load generator building blocks', () => {
     const updates = Array.from({ length: 10 }, () => a.editRandomly());
     [...updates].reverse().concat(updates).forEach((u) => b.applyRemote(u));
     expect(b.digest()).toBe(a.digest());
+  });
+
+  it('counts window events delivered to none, some, and all recipients', () => {
+    const fanout = new FanoutTracker();
+    fanout.noteScheduled('none', 2);
+    fanout.noteScheduled('partial', 2);
+    fanout.noteDelivered('partial', 0);
+    fanout.noteScheduled('all', 2);
+    fanout.noteDelivered('all', 0);
+    fanout.noteDelivered('all', 1);
+    fanout.noteDelivered('all', 1);
+    const counts = fanout.summarize(30, 240, 15);
+    expect(counts.windowStartS).toBe(30);
+    expect(counts.windowEndS).toBe(270);
+    expect(counts.cutoffS).toBe(285);
+    expect(counts.windowEvents).toBe(3);
+    expect(counts.neverDelivered).toBe(1);
+    expect(counts.deliveredToZero).toBe(1);
+    expect(counts.deliveredToPartial).toBe(1);
+    expect(counts.deliveredToAll).toBe(1);
   });
 
   it('keeps replacing reservoir samples after the cap (Algorithm R)', () => {
