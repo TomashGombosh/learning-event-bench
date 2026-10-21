@@ -126,22 +126,32 @@ if missing:
 suffix = (" " + " ".join(flags)) if flags else ""
 
 def resource_suffix(items):
-    cpu_seconds = events = client_meta = 0.0
+    events = client_meta = 0.0
     server_meta = 0.0
+    process_cpu = 0.0
     saw = False
     for summary in items:
         resources = summary.get("resources") or {}
         if "cpuSeconds" not in resources and "stateMetadataBytes" not in resources:
             continue
         saw = True
-        cpu_seconds += float(resources.get("cpuSeconds") or 0)
+        process_cpu += float(resources.get("cpuSeconds") or 0)
         events += float(resources.get("events") or 0)
         client_meta += float(resources.get("metadataBytes") or 0)
         server_meta = max(server_meta, float(resources.get("serverMetadataBytes") or 0))
-    if not saw:
+    container_cpu = None
+    try:
+        from sample_cell import container_cpu_seconds
+        container_cpu = container_cpu_seconds(Path("results", run_id, "cpu_samples.csv"))
+    except Exception:
+        container_cpu = None
+    if container_cpu is None and not saw:
         return ""
+    cpu_seconds = container_cpu if container_cpu is not None else process_cpu
+    source = "containers" if container_cpu is not None else "loadgen"
     per_thousand = (cpu_seconds * 1000 / events) if events else 0.0
-    return f" cpu_s_per_1000={per_thousand:.4f} metadata_bytes={client_meta + server_meta:.0f}"
+    meta = f" metadata_bytes={client_meta + server_meta:.0f}" if saw else ""
+    return f" cpu_s_per_1000={per_thousand:.4f} cpu_source={source}{meta}"
 
 print(
     f"CELL {run_id} broker={broker} offered/attempted={nominal:.1f}/{attempted:.1f} "
@@ -182,6 +192,13 @@ prepare_brokers() {
   docker compose kill gateway1 gateway2 gateway3 </dev/null >/dev/null 2>&1 || true
   if ! docker compose exec -T redis redis-cli FLUSHALL </dev/null >/dev/null 2>&1; then
     echo "redis FLUSHALL failed; recreating the stack" >&2
+    brokers_ready=0
+    docker compose down -v --remove-orphans </dev/null >/dev/null 2>&1 || true
+    return 1
+  fi
+  if ! docker compose exec -T postgres psql -U sharedb -d sharedb -c 'TRUNCATE ops, snapshots;' \
+      </dev/null >/dev/null 2>&1; then
+    echo "postgres TRUNCATE failed; recreating the stack" >&2
     brokers_ready=0
     docker compose down -v --remove-orphans </dev/null >/dev/null 2>&1 || true
     return 1
@@ -230,8 +247,24 @@ report_cells() {
   printf '{"executed":%s,"expected":%s,"failed":%s}\n' \
     "$executed" "$expected_cells" "${#failed_cells[@]}" > results/cells-summary.json
 }
+sample_pid=""
+stop_sampler() {
+  if [ -n "${sample_pid}" ]; then
+    kill "$sample_pid" 2>/dev/null || true
+    wait "$sample_pid" 2>/dev/null || true
+    sample_pid=""
+  fi
+}
+start_sampler() {
+  # Same csv as feature/BD-000-mmc-instrumentation (PR #21): one row per second
+  # per container. 3<&- so the sampler cannot drain the matrix fd.
+  python3 experiments/sample_cell.py --out "results/$run_id" --broker "$broker" \
+    </dev/null 3<&- >>"results/$run_id/sampler.log" 2>&1 &
+  sample_pid=$!
+}
 cleanup() {
   local rc=$?
+  stop_sampler || true
   report_cells || true
   if [ "$rc" -eq 42 ]; then
     python3 experiments/validate_cells.py --summary --aborted --results results || true
@@ -263,6 +296,7 @@ while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id 
   fi
   scheme=${scheme:-yjs}
   executed=$((executed + 1))
+  stop_sampler
   if cell_complete "$run_id" "$rooms"; then echo "skip $run_id"; continue; fi
   echo "=== $run_id ($(date -Is))"
   export BROKER=$broker
@@ -279,7 +313,7 @@ while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id 
       continue
     fi
   elif ! timeout -k 20s "$COMPOSE_UP_TIMEOUT_S" \
-      docker compose up -d --no-build --wait redis kafka gateway1 gateway2 gateway3 \
+      docker compose up -d --no-build --wait redis kafka postgres gateway1 gateway2 gateway3 \
       </dev/null > "results/$run_id/compose-up.log" 2>&1; then
     echo "cell $run_id failed: compose up timed out or failed after ${COMPOSE_UP_TIMEOUT_S}s" | tee "results/$run_id/cell-failed.txt" >&2
     brokers_ready=0
@@ -290,6 +324,7 @@ while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id 
     brokers_ready=1
   fi
   sleep 2
+  start_sampler
   # Track the killer separately. A bare `wait` also waits for this sleeper, so a
   # finished loadgen still blocked the cell until KILL_AT_S (and a hung loadgen forever).
   kill_pid=""
@@ -340,6 +375,7 @@ while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id 
     kill "$kill_pid" 2>/dev/null || true
     wait "$kill_pid" 2>/dev/null || true
   fi
+  stop_sampler
   docker compose logs --no-color gateway1 gateway2 gateway3 </dev/null > "results/$run_id/gateways.log" 2>&1 || true
   emit_cell_summary "$run_id" "$broker" "$load" "$SHARDS" "$rooms" "$shard_failed"
   fail_fast_args=()

@@ -1,0 +1,38 @@
+name: ot-integration
+
+# Redis, Kafka, and Postgres, then the contract suites and one ShareDB cell per
+# transport (including reconnect and a gateway kill). Runs in the compose
+# network so brokers are reached as redis/kafka/postgres.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  sharedb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CPUSET_GATEWAY1: "0"
+      CPUSET_GATEWAY2: "0"
+      CPUSET_GATEWAY3: "0"
+      CPUSET_REDIS: "0"
+      CPUSET_KAFKA: "0"
+      CPUSET_POSTGRES: "0"
+      CPUSET_GATEWAYS: "0"
+      CPUSET_LOADGEN: "0"
+      KAFKA_HEAP_OPTS: "-Xms256M -Xmx256M"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start Redis, Kafka, and Postgres
+        run: docker compose up -d --wait redis kafka postgres
+      - name: Build the bench image
+        run: docker compose build gateway1
+      - name: Contract tests and ShareDB cells
+        run: >
+          docker compose run --rm --no-deps --entrypoint npx
+          -e REDIS_URL=redis://redis:6379
+          -e KAFKA_BROKERS=kafka:9092
+          -e DATABASE_URL=postgres://sharedb:sharedb@postgres:5432/sharedb
+          gateway1
+          jest test/contract test/integration --forceExit --testTimeout=120000

@@ -58,7 +58,9 @@ if [ -z "${SHARDS+x}" ]; then
 fi
 export SHARDS
 export CPUSET_GATEWAYS="${CPUSET_GATEWAYS:-${CPUSET_GATEWAY1}}"
-echo "cpu split: gateway1=${CPUSET_GATEWAY1} gateway2=${CPUSET_GATEWAY2} gateway3=${CPUSET_GATEWAY3} redis=${CPUSET_REDIS} kafka=${CPUSET_KAFKA} loadgen=${CPUSET_LOADGEN} (${LOADGEN_CPUS} cores, ${SHARDS} shards)"
+# The shared OT database sits on the Redis cores. Gateway cores stay clear of it.
+export CPUSET_POSTGRES="${CPUSET_POSTGRES:-${CPUSET_REDIS}}"
+echo "cpu split: gateway1=${CPUSET_GATEWAY1} gateway2=${CPUSET_GATEWAY2} gateway3=${CPUSET_GATEWAY3} redis=${CPUSET_REDIS} postgres=${CPUSET_POSTGRES} kafka=${CPUSET_KAFKA} loadgen=${CPUSET_LOADGEN} (${LOADGEN_CPUS} cores, ${SHARDS} shards)"
 
 write_meta() {
   cat > results/run-metadata.json <<JSON
