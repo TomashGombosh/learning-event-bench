@@ -26,6 +26,8 @@ export class RedisStreamsEventBus implements EventBusPort, ReplayableEventLogPor
   private readonly handlers = new Map<string, Set<EventHandler>>();
   private running = true;
   private loop: Promise<void> | null = null;
+  private lastCursorPublish = 0;
+  private cursorPublish: Promise<unknown> | null = null;
 
   constructor(
     redisUrl: string,
@@ -82,7 +84,24 @@ export class RedisStreamsEventBus implements EventBusPort, ReplayableEventLogPor
         .xread('BLOCK', this.options.blockMs, 'STREAMS', ...keys, ...ids)
         .catch(() => null)) as StreamEntries;
       for (const [key, entries] of result ?? []) this.dispatch(key, entries);
+      this.publishCursors();
     }
+  }
+
+  /**
+   * Last id this gateway has applied, once a second. The host sampler compares it
+   * with the stream's last id. There is no consumer group (no XREADGROUP, no PEL).
+   */
+  private publishCursors(): void {
+    const now = Date.now();
+    if (now - this.lastCursorPublish < 1000 || this.cursorPublish || this.cursors.size === 0) return;
+    this.lastCursorPublish = now;
+    const pipe = this.writer.pipeline();
+    for (const [room, id] of this.cursors) pipe.hset('bench:stream-cursors', room, id);
+    pipe.expire('bench:stream-cursors', 120);
+    this.cursorPublish = pipe.exec().catch(() => undefined).finally(() => {
+      this.cursorPublish = null;
+    });
   }
 
   private dispatch(key: string, entries: Array<[string, string[]]>): void {
