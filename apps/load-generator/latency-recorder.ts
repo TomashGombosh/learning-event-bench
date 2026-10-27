@@ -7,7 +7,12 @@ import { Random } from './random';
 const MICROS_PER_MS = 1000;
 const PERCENTILES = [50, 75, 90, 95, 99, 99.9, 100];
 
-/** HDR histogram for exact percentiles + a uniform reservoir of raw samples for bootstrap. */
+/**
+ * HDR histogram for exact percentiles, plus a bounded reservoir of raw samples.
+ * The histogram records every delivery. The reservoir is Vitter/Li Algorithm L:
+ * a uniform sample of the whole in-window stream, with a geometric skip so the
+ * hot path is a counter compare once the reservoir is full.
+ */
 export class LatencyRecorder {
   private readonly service = hdr.build({
     lowestDiscernibleValue: 1,
@@ -25,27 +30,22 @@ export class LatencyRecorder {
   private clockSkew = 0;
   /** Slot chosen by the last shouldCapture() call. -1 means this delivery is histogram-only. */
   private pendingSlot = -1;
+  /** Algorithm L threshold. The next 0-based index that enters the reservoir. */
+  private nextAccept = Number.POSITIVE_INFINITY;
+  /** Algorithm L weight. Inclusion gaps are geometric with success probability w. */
+  private w = 1;
+  private lArmed = false;
 
   constructor(private readonly random: Random, private readonly reservoirSize: number) {}
 
   /**
-   * Algorithm R over the whole window. The first `reservoirSize` deliveries fill the
-   * reservoir; every later delivery replaces a slot with probability size/n.
-   * Stopping once the reservoir was full biased L5000 toward the start of the window.
+   * Whether this delivery should allocate a raw sample. Call once, then recordServiceUs.
+   * The first `reservoirSize` deliveries fill the reservoir. Later deliveries are skipped
+   * until the precomputed Algorithm L index, which replaces one uniform slot.
    */
   shouldCapture(): boolean {
-    const n = this.seen + 1;
-    if (this.reservoir.length < this.reservoirSize) {
-      this.pendingSlot = this.reservoir.length;
-      return true;
-    }
-    const slot = Math.floor(this.random() * n);
-    if (slot < this.reservoirSize) {
-      this.pendingSlot = slot;
-      return true;
-    }
-    this.pendingSlot = -1;
-    return false;
+    this.pendingSlot = this.chooseSlot();
+    return this.pendingSlot >= 0;
   }
 
   /** Hot path: HDR histogram always. `sample` is set only when shouldCapture() was true. */
@@ -53,24 +53,18 @@ export class LatencyRecorder {
     if (serviceUs < 0) this.clockSkew++;
     else this.service.recordValue(Math.max(1, Math.round(serviceUs)));
     this.seen++;
-    if (sample !== undefined && this.pendingSlot >= 0 && this.pendingSlot <= this.reservoir.length) {
-      if (this.pendingSlot === this.reservoir.length) this.reservoir.push(sample);
-      else this.reservoir[this.pendingSlot] = sample;
-    }
-    this.pendingSlot = -1;
+    this.storePending(sample);
   }
 
-  /** Service latency of one delivered remote event (send -> receive). */
+  /** Service latency of one delivered remote event (send -> receive). Same reservoir as shouldCapture. */
   record(sample: LatencySample): void {
     const serviceMs = sample.serviceMs ?? sample.totalMs;
+    const slot = this.chooseSlot();
     if (serviceMs < 0) this.clockSkew++;
     else this.service.recordValue(Math.max(1, Math.round(serviceMs * MICROS_PER_MS)));
     this.seen++;
-    if (this.reservoir.length < this.reservoirSize) this.reservoir.push(sample);
-    else {
-      const slot = Math.floor(this.random() * this.seen);
-      if (slot < this.reservoirSize) this.reservoir[slot] = sample;
-    }
+    this.pendingSlot = slot;
+    this.storePending(sample);
   }
 
   /** Open-loop delay between the scheduled send time and the actual send. */
@@ -93,6 +87,8 @@ export class LatencyRecorder {
       scheduleLagP99Ms: this.percentile(this.lag, 99, this.lagSeen),
       reservoirMinScheduledMs: this.reservoirSpan().min,
       reservoirMaxScheduledMs: this.reservoirSpan().max,
+      reservoirEligible: this.seen,
+      reservoirKept: this.reservoir.length,
     };
     for (const p of PERCENTILES) result[`p${p}Ms`] = this.percentile(this.service, p, this.seen);
     return result;
@@ -121,6 +117,60 @@ export class LatencyRecorder {
       join(directory, 'latency_samples.csv'),
       'room,total_ms,service_ms,schedule_lag_ms,uplink_ms,downlink_ms,scheduled_at_ms\n' + rows.join('\n') + '\n',
     );
+  }
+
+  /** Open (0, 1). log(0) and a draw of 1 would stall or overshoot Algorithm L. */
+  private unit(): number {
+    const u = this.random();
+    if (!(u > 0)) return Number.MIN_VALUE;
+    if (u >= 1) return 1 - Number.EPSILON;
+    return u;
+  }
+
+  /** Keep 1-w inside (0, 1) so the geometric skip stays finite. */
+  private clampW(w: number): number {
+    if (!(w > 0) || !(w < 1)) return 0.5;
+    if (1 - w === 0) return 1 - Number.EPSILON;
+    if (1 - w === 1) return Number.EPSILON;
+    return w;
+  }
+
+  /** Records to skip before the next acceptance. Does not update w. */
+  private geometricSkip(): number {
+    const skip = Math.floor(Math.log(this.unit()) / Math.log(1 - this.w));
+    return Number.isFinite(skip) && skip >= 0 ? skip : 0;
+  }
+
+  /**
+   * Arm Algorithm L once the reservoir holds k items. The next candidate is
+   * 0-based index k (1-based k+1). Wikipedia's loop leaves i at the last filled
+   * item and then adds floor(log(u)/log(1-W))+1, which lands on k+skip.
+   */
+  private armL(): void {
+    this.w = this.clampW(Math.exp(Math.log(this.unit()) / this.reservoirSize));
+    this.nextAccept = this.reservoirSize + this.geometricSkip();
+    this.lArmed = true;
+  }
+
+  /** 0-based index of the item about to be counted. -1 means histogram only. */
+  private chooseSlot(): number {
+    if (!(this.reservoirSize > 0)) return -1;
+    const index = this.seen;
+    if (this.reservoir.length < this.reservoirSize) return this.reservoir.length;
+    if (!this.lArmed) this.armL();
+    if (index !== this.nextAccept) return -1;
+    const slot = Math.floor(this.unit() * this.reservoirSize);
+    this.w = this.clampW(this.w * Math.exp(Math.log(this.unit()) / this.reservoirSize));
+    this.nextAccept = index + 1 + this.geometricSkip();
+    return slot;
+  }
+
+  private storePending(sample: LatencySample | undefined): void {
+    const slot = this.pendingSlot;
+    this.pendingSlot = -1;
+    if (sample === undefined || slot < 0 || slot > this.reservoir.length) return;
+    if (slot === this.reservoir.length) this.reservoir.push(sample);
+    else this.reservoir[slot] = sample;
   }
 
   private reservoirSpan(): { min: number; max: number } {

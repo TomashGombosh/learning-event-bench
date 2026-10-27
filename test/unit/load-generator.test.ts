@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { latencyOf } from '@domain/latency';
 import { ConnectGate, initialFailover, noteFailure, pickGateway } from '../../apps/load-generator/gateway-failover';
 import { FanoutTracker } from '../../apps/load-generator/fanout-tracker';
@@ -189,15 +192,132 @@ describe('load generator building blocks', () => {
     expect(counts.deliveredToAll).toBe(1);
   });
 
-  it('keeps replacing reservoir samples after the cap (Algorithm R)', () => {
-    const recorder = new LatencyRecorder(() => 0, 2);
-    for (let i = 1; i <= 5; i++) {
-      expect(recorder.shouldCapture()).toBe(true);
-      recorder.recordServiceUs(i * 1000, latencyOf('r', i * 1000, i * 1000 + 10, undefined, i * 1000));
+  it('caps the reservoir and skips with Algorithm L instead of a draw per delivery', () => {
+    const n = 10_000;
+    const k = 100;
+    let draws = 0;
+    const random = seededRandom(20261021);
+    const recorder = new LatencyRecorder(() => {
+      draws++;
+      return random();
+    }, k);
+    let captures = 0;
+    for (let i = 0; i < n; i++) {
+      if (recorder.shouldCapture()) {
+        captures++;
+        recorder.recordServiceUs((i + 1) * 1000, latencyOf('r', i, i + 1, undefined, i));
+      } else {
+        recorder.recordServiceUs((i + 1) * 1000);
+      }
     }
     const summary = recorder.summary();
-    expect(summary.count).toBe(5);
-    expect(summary.reservoirMaxScheduledMs).toBe(5000);
-    expect(summary.reservoirMinScheduledMs).toBe(2000);
+    expect(summary.count).toBe(n);
+    expect(summary.reservoirEligible).toBe(n);
+    expect(summary.reservoirKept).toBe(k);
+    expect(captures).toBeGreaterThan(k);
+    expect(captures).toBeLessThan(n / 2);
+    // Fill uses no draws. Arming uses 2; each later acceptance uses 3.
+    expect(draws).toBe(2 + 3 * (captures - k));
+  });
+
+  it('spreads raw samples uniformly across the record window', () => {
+    const n = 20_000;
+    const k = 2_000;
+    const sampleCsv = (seed: number): string => {
+      const recorder = new LatencyRecorder(seededRandom(seed), k);
+      for (let i = 0; i < n; i++) {
+        const serviceMs = i;
+        if (recorder.shouldCapture()) {
+          recorder.recordServiceUs(serviceMs * 1000, latencyOf('r', i, i + serviceMs, undefined, i));
+        } else {
+          recorder.recordServiceUs(serviceMs * 1000);
+        }
+      }
+      const dir = mkdtempSync(join(tmpdir(), 'reservoir-'));
+      try {
+        recorder.writeCsv(dir);
+        return readFileSync(join(dir, 'latency_samples.csv'), 'utf8');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const csv = sampleCsv(20261021);
+    expect(sampleCsv(20261021)).toBe(csv);
+    const lines = csv.trim().split('\n');
+    expect(lines[0]).toBe('room,total_ms,service_ms,schedule_lag_ms,uplink_ms,downlink_ms,scheduled_at_ms');
+    const scheduled = lines.slice(1).map((line) => Number(line.split(',')[6]));
+    const service = lines.slice(1).map((line) => Number(line.split(',')[2]));
+    expect(scheduled).toHaveLength(k);
+    const bins = [0, 0, 0, 0];
+    const width = n / bins.length;
+    for (const t of scheduled) bins[Math.min(bins.length - 1, Math.floor(t / width))]++;
+    const expected = k / bins.length;
+    for (const count of bins) {
+      expect(count).toBeGreaterThan(expected * 0.5);
+      expect(count).toBeLessThan(expected * 1.5);
+    }
+    const meanService = service.reduce((sum, value) => sum + value, 0) / service.length;
+    expect(meanService).toBeGreaterThan(n * 0.4);
+    expect(meanService).toBeLessThan(n * 0.6);
+    expect(Math.min(...scheduled)).toBeLessThan(0.1 * (n - 1));
+    expect(Math.max(...scheduled)).toBeGreaterThan(0.9 * (n - 1));
+  });
+
+  it('keeps every in-window delivery in the HDR histogram while the reservoir stays capped', () => {
+    const n = 4_000;
+    const recorder = new LatencyRecorder(seededRandom(7), 100);
+    for (let i = 0; i < n; i++) {
+      const serviceUs = i < n / 2 ? 1_000 : 100_000;
+      if (recorder.shouldCapture()) recorder.recordServiceUs(serviceUs, latencyOf('r', i, i + serviceUs / 1000, undefined, i));
+      else recorder.recordServiceUs(serviceUs);
+    }
+    const summary = recorder.summary();
+    expect(summary.count).toBe(n);
+    expect(summary.reservoirKept).toBe(100);
+    expect(summary.reservoirEligible).toBe(n);
+    expect(summary.meanMs).toBeGreaterThan(40);
+    expect(summary.meanMs).toBeLessThan(60);
+    expect(summary.p100Ms).toBeGreaterThan(50);
+  });
+
+  it('record() keeps the same cap and covers the whole stream', () => {
+    const n = 5_000;
+    const k = 200;
+    const recorder = new LatencyRecorder(seededRandom(20261021), k);
+    for (let i = 0; i < n; i++) recorder.record(latencyOf('r', i, i + i, undefined, i));
+    const summary = recorder.summary();
+    expect(summary.count).toBe(n);
+    expect(summary.reservoirEligible).toBe(n);
+    expect(summary.reservoirKept).toBe(k);
+    expect(summary.reservoirMinScheduledMs).toBeLessThan(0.1 * (n - 1));
+    expect(summary.reservoirMaxScheduledMs).toBeGreaterThan(0.9 * (n - 1));
+  });
+
+  it('includes early and late deliveries at the same rate', () => {
+    const n = 80;
+    const k = 8;
+    const trials = 300;
+    const hits = new Array<number>(n).fill(0);
+    for (let trial = 1; trial <= trials; trial++) {
+      const recorder = new LatencyRecorder(seededRandom(trial), k);
+      for (let i = 0; i < n; i++) {
+        if (recorder.shouldCapture()) recorder.recordServiceUs(1000, latencyOf('r', i, i + 1, undefined, i));
+        else recorder.recordServiceUs(1000);
+      }
+      const dir = mkdtempSync(join(tmpdir(), 'reservoir-'));
+      try {
+        recorder.writeCsv(dir);
+        const csv = readFileSync(join(dir, 'latency_samples.csv'), 'utf8');
+        for (const line of csv.trim().split('\n').slice(1)) hits[Number(line.split(',')[6])]++;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+      expect(recorder.summary().reservoirKept).toBe(k);
+    }
+    const expected = trials * (k / n);
+    for (const index of [0, 20, 40, 60, n - 1]) {
+      expect(hits[index]).toBeGreaterThan(expected * 0.45);
+      expect(hits[index]).toBeLessThan(expected * 1.7);
+    }
   });
 });

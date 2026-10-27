@@ -110,7 +110,8 @@ See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Ac
 
 ### Outputs (per run and shard: `results/<run>/shard-<i>/`)
 `summary.json` (config, counters, HDR percentiles, delivery ratio, Kafka `producer` `{idempotent, acks, maxInFlight}`, R, `clientsLost`, `clientsNotConverged`), `latency_percentiles.csv`, `latency_samples.csv`
-(uniform reservoir of raw samples with uplink/downlink split and scheduled time), `rooms.csv`, `replicas.csv`.
+(Algorithm L reservoir of raw samples, uniform over the whole record window `[warmup, warmup+duration)`, with uplink/downlink split and scheduled time), `rooms.csv`, `replicas.csv`.
+`latency.reservoirEligible` is how many in-window deliveries the reservoir drew from, and `latency.reservoirKept` is how many rows were stored (at most `RESERVOIR`, default 50000). Each CSV row has equal weight and stands for `reservoirEligible / reservoirKept` deliveries. The CSV columns are unchanged. HDR percentiles still count every delivery.
 `results/validity.json` is the PASS/FAIL table for the run.
 `results/<run>/cpu_samples.csv` is one row per second per container (`ts`, `container`, `cpu_seconds_cumulative`, `cpu_fraction`) for the gateways, Redis, Kafka, and the load generator. Cumulative time comes from cgroup `cpu.stat` `usage_usec`; `docker stats` is the fallback. `cpu_fraction` is core-seconds per wall-second and can exceed 1.
 `results/<run>/lag_samples.csv` is consumer lag (`ts`, `broker`, `consumer`, `partition`, `log_end`, `read_position`, `lag`). Kafka lag is log end offset minus the gateway group's read position. Redis Streams lag is `XINFO GROUPS`, or the entries after the gateway cursor when there is no group. Pub/Sub has no backlog, so `lag` is `n/a`.
