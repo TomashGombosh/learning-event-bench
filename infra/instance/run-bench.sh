@@ -109,6 +109,18 @@ case "$profile" in
     echo "profile=kafka-rerun: ~40 Kafka cells duration=${BENCH_DURATION_S}s fail-fast=on"
     VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
     ;;
+  mmc-smoke)
+    echo "profile=mmc-smoke: 6 cells, mixed T, fail-fast=on"
+    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
+    ;;
+  mmc-e1)
+    echo "profile=mmc-e1: 96 saturation cells T=240 fail-fast=on"
+    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
+    ;;
+  mmc-e2)
+    echo "profile=mmc-e2: 60 window cells T=60..480 fail-fast=on"
+    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
+    ;;
   cells)
     # Only the run ids / presets in BENCH_CELLS (comma separated). Ids are kept, so the
     # results can replace those cells of the earlier run (fetch_results.sh BASE_RUN_ID).
@@ -159,6 +171,9 @@ fi
 case "$profile" in
   smoke) (cd experiments && python3 make_matrix.py smoke) ;;
   kafka-rerun) (cd experiments && python3 make_matrix.py kafka-rerun) ;;
+  mmc-smoke) (cd experiments && python3 make_matrix.py mmc-smoke) ;;
+  mmc-e1) (cd experiments && python3 make_matrix.py mmc-e1) ;;
+  mmc-e2) (cd experiments && python3 make_matrix.py mmc-e2) ;;
   cells)
     if ! (cd experiments && python3 make_matrix.py cells "${BENCH_CELLS}"); then
       echo "make_matrix rejected BENCH_CELLS=${BENCH_CELLS}"
@@ -168,6 +183,30 @@ case "$profile" in
   *) (cd experiments && python3 make_matrix.py "${BENCH_REPS}") ;;
 esac
 cells="$(tail -n +2 experiments/configs/matrix.csv | grep -c . || true)"
+# MMC E2 mixes windows. The watchdog uses the longest duration_s in the matrix,
+# not the profile default, so a 480s cell is not killed by a 240s budget.
+max_duration="$(python3 -c '
+import csv, os
+floor = int(float(os.environ.get("DURATION_S", "240")))
+mx = floor
+with open("experiments/configs/matrix.csv", newline="") as handle:
+    for row in csv.DictReader(handle):
+        raw = (row.get("duration_s") or "").strip()
+        if raw:
+            mx = max(mx, int(float(raw)))
+print(mx)
+')"
+if [ "$max_duration" != "$DURATION_S" ]; then
+  saved_warmup="${WARMUP_S-}"
+  saved_drain="${DRAIN_S-}"
+  unset WARMUP_S DRAIN_S KILL_AT_S
+  apply_window_defaults "$max_duration"
+  CELL_TIMEOUT_S="$(cell_timeout_seconds "$WARMUP_S" "$max_duration" "$DRAIN_S")"
+  export CELL_TIMEOUT_S
+  if [ -n "$saved_warmup" ]; then WARMUP_S="$saved_warmup"; fi
+  if [ -n "$saved_drain" ]; then DRAIN_S="$saved_drain"; fi
+  export WARMUP_S DRAIN_S
+fi
 # One cell may spend the compose-up budget plus the loadgen timeout. The watchdog
 # is that wall time times the matrix, plus a few minutes to upload. It calls the
 # same path as a failed bench: sync results and bench.log to S3, then power off.

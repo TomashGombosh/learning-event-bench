@@ -8,10 +8,13 @@ on:
         default: c7g.4xlarge
         type: string
       profile:
-        description: smoke (~1h) then kafka-rerun, then full. Default never starts the long run.
+        description: smoke (~1h), mmc-smoke (~40min), mmc-e1 (~10h), mmc-e2 (~6h), kafka-rerun, then full. Default never starts a long run.
         type: choice
         options:
           - smoke
+          - mmc-smoke
+          - mmc-e1
+          - mmc-e2
           - kafka-rerun
           - cells
           - full
@@ -25,7 +28,7 @@ on:
         default: "5"
         type: string
       bench_duration_s:
-        description: Measurement window in seconds when profile=full. Smoke is 60s.
+        description: Measurement window in seconds when profile=full or kafka-rerun. Smoke is 60s. mmc-e1 is 240s. mmc-e2 uses the matrix (max 480s); set this to 480 for the watchdog.
         default: "240"
         type: string
   # Optional: weekly start (Saturday 20:00 UTC). Uncomment to enable.
@@ -81,6 +84,11 @@ jobs:
             exit 1
           fi
 
+      - name: Validate the MMC matrix
+        if: ${{ inputs.profile == 'mmc-smoke' || inputs.profile == 'mmc-e1' || inputs.profile == 'mmc-e2' }}
+        working-directory: experiments
+        run: python3 make_matrix.py "${{ inputs.profile }}" --dry-run
+
       - name: Validate the cell list
         if: ${{ inputs.profile == 'cells' }}
         working-directory: experiments
@@ -116,6 +124,19 @@ jobs:
             cells)
               REPS=1
               DURATION="$BENCH_DURATION_S"
+              ;;
+            mmc-smoke)
+              REPS=1
+              DURATION=240
+              ;;
+            mmc-e1)
+              REPS=3
+              DURATION=240
+              ;;
+            mmc-e2)
+              REPS=3
+              # Longest window in the matrix. Each cell still uses its own T.
+              DURATION=480
               ;;
             *)
               PROFILE=smoke

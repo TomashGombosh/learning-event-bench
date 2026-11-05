@@ -11,6 +11,9 @@ Modes (first argument):
   smoke         one short cell per broker x scenario, including the configs that
                 invalidated the 20261018 run. About 45-60 min at a 60s window.
   kafka-rerun   about 40 Kafka-only cells (plain, tuned, idempotent off).
+  mmc-smoke     6-cell MMC smoke (~40 min). See experiments/make_mmc_matrix.py.
+  mmc-e1        MMC saturation grid, 96 cells, T=240.
+  mmc-e2        MMC window grid, 60 cells, T in {60,120,240,480}.
   cells SPEC    only the listed cells. SPEC is a comma or space separated list of
                 run ids from an earlier matrix (for example
                 008-C-kafka-tuned-L5000-nu0.01-k0-r3) and/or preset names from
@@ -26,6 +29,7 @@ Full and kafka-rerun runs abort if that cell fails the validity gate.
 from __future__ import annotations
 
 import csv
+import os
 import random
 import re
 import sys
@@ -38,14 +42,24 @@ def rooms_for(load: float) -> int:
     return int(load / (CLIENTS * RATE))
 
 
-def row(stage, broker, load, nu, kill, rep):
+def row(stage, broker, load, nu, kill, rep, duration_s=None):
+    """One matrix cell. duration_s is the measurement window T.
+
+    Omitted duration follows DURATION_S, or 240 when that is unset. MMC matrices
+    pass T explicitly so one plan can mix 60, 120, 240 and 480.
+    """
+    if duration_s is None:
+        raw = os.environ.get("DURATION_S", "")
+        duration = int(float(raw)) if raw else 240
+    else:
+        duration = int(duration_s)
     return dict(
         stage=stage, broker=broker, load=load, rooms=rooms_for(load), clients=CLIENTS, rate=RATE,
-        disconnects_per_min=nu, gateway_kill=kill, rep=rep,
+        disconnects_per_min=nu, gateway_kill=kill, rep=rep, duration_s=duration,
     )
 
 
-def order_with_canaries(rows: list[dict]) -> list[dict]:
+def order_with_canaries(rows: list[dict], seed: int = SEED) -> list[dict]:
     """One risky cell per broker x scenario first, then the rest in a fixed shuffle."""
     grouped: dict[tuple, list] = {}
     for item in rows:
@@ -58,8 +72,8 @@ def order_with_canaries(rows: list[dict]) -> list[dict]:
     canaries.sort(key=lambda r: (r["stage"], r["broker"]))
     a_rest = [r for r in rest if r["stage"] == "A"]
     tail = [r for r in rest if r["stage"] != "A"]
-    random.Random(SEED).shuffle(a_rest)
-    random.Random(SEED + 1).shuffle(tail)
+    random.Random(seed).shuffle(a_rest)
+    random.Random(seed + 1).shuffle(tail)
     a_can = [r for r in canaries if r["stage"] == "A"]
     later = [r for r in canaries if r["stage"] != "A"]
     return a_can + a_rest + later + tail
@@ -131,7 +145,8 @@ def factorial_rows(reps: int) -> list[dict]:
 
 CELL_ID = re.compile(
     r"^(?P<index>\d{3})-(?P<stage>[ABC])-(?P<broker>pubsub|streams|kafka|kafka-tuned|kafka-acks)"
-    r"-L(?P<load>\d+)-nu(?P<nu>\d+(?:\.\d+)?)-k(?P<kill>[01])-r(?P<rep>\d+)$"
+    r"-L(?P<load>\d+)-nu(?P<nu>\d+(?:\.\d+)?)-k(?P<kill>[01])-r(?P<rep>\d+)"
+    r"(?:-T(?P<duration>\d+))?$"
 )
 
 # Run 20261018T110200Z-c440945 (git c440945, 128 cells). Its kafka-tuned cells at L5000
@@ -187,7 +202,11 @@ def parse_cell_id(cell_id: str) -> dict:
     if not match:
         raise ValueError(f"not a matrix run id: {cell_id!r}")
     load = int(match["load"])
-    item = row(match["stage"], match["broker"], load, _number(match["nu"]), int(match["kill"]), int(match["rep"]))
+    duration = int(match["duration"]) if match.group("duration") else None
+    item = row(
+        match["stage"], match["broker"], load, _number(match["nu"]), int(match["kill"]), int(match["rep"]),
+        duration,
+    )
     item["run_id"] = cell_id
     return item
 
@@ -212,6 +231,9 @@ def plan_for(argument: str, spec: str = "") -> tuple[str, list[dict]]:
         return "kafka-rerun", kafka_rerun_rows()
     if argument in ("cells", "--cells"):
         return "cells", cells_rows(spec)
+    if argument in ("mmc-smoke", "mmc-e1", "mmc-e2"):
+        from make_mmc_matrix import rows_for
+        return argument, rows_for(argument)
     return "factorial", factorial_rows(int(argument))
 
 
@@ -219,9 +241,11 @@ def write_matrix(rows: list[dict], path: str) -> None:
     for i, item in enumerate(rows):
         if item.get("run_id"):
             continue  # cells profile: keep the id of the run being replaced
+        duration = item.get("duration_s")
+        window = f"-T{int(duration)}" if duration not in ("", None) else ""
         item["run_id"] = (
             f"{i:03d}-{item['stage']}-{item['broker']}-L{item['load']}"
-            f"-nu{item['disconnects_per_min']}-k{item['gateway_kill']}-r{item['rep']}"
+            f"-nu{item['disconnects_per_min']}-k{item['gateway_kill']}-r{item['rep']}{window}"
         )
     with open(path, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()), lineterminator="\n")
@@ -238,7 +262,9 @@ def main(argv: list[str]) -> None:
         sys.exit(f"make_matrix: {error}")
     if dry_run:
         for item in rows:
-            print(item.get("run_id") or f"{item['stage']}-{item['broker']}-L{item['load']}")
+            window = item.get("duration_s")
+            suffix = f"-T{int(window)}" if window not in ("", None) else ""
+            print(item.get("run_id") or f"{item['stage']}-{item['broker']}-L{item['load']}{suffix}")
         print(f"{len(rows)} {label} runs (dry run, nothing written)")
         return
     write_matrix(rows, "configs/matrix.csv")

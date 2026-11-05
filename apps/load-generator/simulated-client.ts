@@ -6,6 +6,7 @@ import { ReplicaDigest } from '@domain/reliability';
 import { CatchUpResult } from '@application/use-cases/catch-up.use-case';
 import { preciseNowMs } from './clock';
 import { ConnectGate, FailoverState, initialFailover, noteFailure, pickGateway } from './gateway-failover';
+import { FanoutTracker } from './fanout-tracker';
 import { LatencyRecorder } from './latency-recorder';
 import { PoissonSchedule } from './poisson-schedule';
 import { YjsReplica } from './yjs-replica';
@@ -79,6 +80,11 @@ export class SimulatedClient {
     private readonly schedule: PoissonSchedule,
     private readonly recorder: LatencyRecorder,
     readonly counters: ClientCounters,
+    private readonly fanout: FanoutTracker | null = null,
+    /** Index among the room's clients. The bitmask in FanoutTracker has 31 bits. */
+    private readonly recipientIndex = 0,
+    /** Other clients in the room. A window event delivered to all of them is uncensored. */
+    private readonly expectedRecipients = 0,
   ) {
     this.failover = initialFailover(clientId, gatewayUrls.length);
   }
@@ -151,7 +157,12 @@ export class SimulatedClient {
     while (burst < 4 && this.schedule.peek() <= nowMs) {
       const scheduledAtMs = this.schedule.advance();
       if (this.online) this.send(scheduledAtMs);
-      else this.counters.skippedWhileOffline++;
+      else {
+        this.counters.skippedWhileOffline++;
+        if (this.inWindow(scheduledAtMs)) {
+          this.fanout?.noteScheduled(this.skipKey(scheduledAtMs), this.expectedRecipients);
+        }
+      }
       burst++;
     }
   }
@@ -214,7 +225,10 @@ export class SimulatedClient {
     this.unacknowledged.set(event.seq, event);
     this.emitWithOutbox(event);
     this.counters.sent++;
-    if (scheduledAtMs >= this.window.fromMs && scheduledAtMs < this.window.toMs) this.counters.sentInWindow++;
+    if (this.inWindow(scheduledAtMs)) {
+      this.counters.sentInWindow++;
+      this.fanout?.noteScheduled(this.eventKey(this.clientId, event.seq), this.expectedRecipients);
+    }
   }
 
   private emitWithOutbox(event: CollabEvent): void {
@@ -228,6 +242,18 @@ export class SimulatedClient {
     });
   }
 
+  private inWindow(scheduledAtMs: number): boolean {
+    return scheduledAtMs >= this.window.fromMs && scheduledAtMs < this.window.toMs;
+  }
+
+  private eventKey(senderId: string, seq: number): string {
+    return `${this.roomId}\t${senderId}\t${seq}`;
+  }
+
+  private skipKey(scheduledAtMs: number): string {
+    return `${this.roomId}\t${this.clientId}\tskip\t${scheduledAtMs}`;
+  }
+
   private onEvent(stored: StoredEvent): void {
     if (this.catchingUp) this.lastLiveIdDuringCatchUp = stored.id;
     else this.lastSeenId = stored.id;
@@ -235,7 +261,8 @@ export class SimulatedClient {
     if (event.clientId === this.clientId) return;
     this.replica.queueRemote(event.payload);
     this.counters.received++;
-    if (event.scheduledAtMs < this.window.fromMs || event.scheduledAtMs >= this.window.toMs) return;
+    if (!this.inWindow(event.scheduledAtMs)) return;
+    this.fanout?.noteDelivered(this.eventKey(event.clientId, event.seq), this.recipientIndex);
     const now = preciseNowMs();
     const sentAt = event.sentAtMs ?? event.scheduledAtMs;
     const serviceUs = (now - sentAt) * 1000;
