@@ -127,7 +127,7 @@ def parse_kafka_lag(text: str) -> list[dict]:
         if len(parts) < 6:
             continue
         group, topic, partition, current, log_end, lag = parts[:6]
-        if topic != "collab-events":
+        if topic not in ("collab-events", "sharedb-ops"):
             continue
         rows.append({
             "broker": "kafka",

@@ -288,9 +288,9 @@ cleanup() {
 }
 trap cleanup EXIT
 expected_cells=$(tail -n +2 "$MATRIX" | grep -c . || true)
-
-# Header-aware. An older matrix has no scheme column; those rows are yjs.
-while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id scheme <&3; do
+# Header-aware. Older matrices may omit scheme and duration_s.
+# scheme defaults to yjs; duration_s empty means the profile window.
+while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id scheme duration_s <&3; do
   if [ -z "$run_id" ]; then
     continue
   fi
@@ -324,12 +324,29 @@ while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id 
     brokers_ready=1
   fi
   sleep 2
+  # A matrix duration overrides the profile window. Short windows keep the 5s warmup.
+  cell_duration="$DURATION_S"
+  cell_warmup="$WARMUP_S"
+  cell_drain="$DRAIN_S"
+  if [ -n "$duration_s" ]; then
+    cell_duration="$duration_s"
+    if [ "$cell_duration" -le 90 ]; then
+      cell_warmup=5
+      cell_drain=5
+    else
+      cell_warmup=30
+      cell_drain=15
+    fi
+  fi
+  cell_kill_at=$(( cell_warmup + cell_duration / 2 ))
+  if [ "$cell_kill_at" -lt 1 ]; then cell_kill_at=1; fi
+  cell_timeout="$(cell_timeout_seconds "$cell_warmup" "$cell_duration" "$cell_drain")"
   start_sampler
   # Track the killer separately. A bare `wait` also waits for this sleeper, so a
   # finished loadgen still blocked the cell until KILL_AT_S (and a hung loadgen forever).
   kill_pid=""
   if [ "$kill" = "1" ]; then
-    (sleep "$KILL_AT_S"; docker compose kill gateway2 </dev/null >/dev/null; echo "killed gateway2") </dev/null 3<&- &
+    (sleep "$cell_kill_at"; docker compose kill gateway2 </dev/null >/dev/null; echo "killed gateway2") </dev/null 3<&- &
     kill_pid=$!
   fi
   pids=()
@@ -341,11 +358,11 @@ while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id 
     # timeout is the hard cap: a stuck join ack cannot pin the instance for hours.
     # 3<&- so the shard cannot hold the matrix fd open.
     (
-      timeout -k 20s "$CELL_TIMEOUT_S" \
+      timeout -k 20s "$cell_timeout" \
         docker compose --profile load run --rm --pull never -T \
         -e RUN_ID="$run_id" -e BROKER_LABEL="$broker" -e SCHEME="$scheme" -e ROOMS="$rooms" -e CLIENTS_PER_ROOM="$clients" \
         -e RATE_PER_CLIENT="$rate" -e DISCONNECTS_PER_MIN="$nu" -e MEAN_OFFLINE_S=2 \
-        -e WARMUP_S="$WARMUP_S" -e DURATION_S="$DURATION_S" -e DRAIN_S="$DRAIN_S" \
+        -e WARMUP_S="$cell_warmup" -e DURATION_S="$cell_duration" -e DRAIN_S="$cell_drain" \
         -e SHARD_INDEX="$s" -e SHARD_COUNT="$SHARDS" -e SEED="$((1000 + rep))" \
         loadgen </dev/null > >(tee "$shard_log") 2>&1
     ) </dev/null 3<&- &
@@ -365,7 +382,7 @@ while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id 
       echo "--- last lines of ${shard_log} ---" >&2
       tail -n 40 "$shard_log" >&2 || true
       if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 143 ]; then
-        echo "cell $run_id hit per-cell timeout ${CELL_TIMEOUT_S}s" | tee -a "results/$run_id/cell-failed.txt" >&2
+        echo "cell $run_id hit per-cell timeout ${cell_timeout}s" | tee -a "results/$run_id/cell-failed.txt" >&2
         docker compose --profile load kill loadgen </dev/null >/dev/null 2>&1 || true
         docker compose --profile load rm -sf loadgen </dev/null >/dev/null 2>&1 || true
       fi
@@ -407,9 +424,16 @@ fields = ["stage", "broker", "load", "rooms", "clients", "rate", "disconnects_pe
 with open(sys.argv[1], newline="") as handle:
     for row in csv.DictReader(handle):
         values = [(row.get(name) or "").strip().strip("\r") for name in fields]
+        # stdin-test and some older files use nu/kill instead of the long names.
+        if not values[6]:
+            values[6] = (row.get("nu") or "").strip().strip("\r")
+        if not values[7]:
+            values[7] = (row.get("kill") or "").strip().strip("\r")
         scheme = (row.get("scheme") or "yjs").strip().strip("\r") or "yjs"
+        duration_s = (row.get("duration_s") or "").strip().strip("\r")
         if not values[-1]:
             continue
-        print("\t".join(values + [scheme]))
+        print("\t".join(values + [scheme, duration_s]))
 PY
 )
+stop_sampler

@@ -5,6 +5,7 @@ import { evaluateRooms, reliability, ReplicaDigest } from '@domain/reliability';
 import { preciseNowMs } from './clock';
 import { loadConfig } from './config';
 import { DisconnectInjector } from './disconnect-injector';
+import { FanoutTracker } from './fanout-tracker';
 import { assessLoad } from './load-report';
 import { LatencyRecorder } from './latency-recorder';
 import { PoissonSchedule } from './poisson-schedule';
@@ -82,8 +83,11 @@ async function main(): Promise<void> {
   });
 
   const createdAt = preciseNowMs();
+  let originMs = createdAt;
+  const fanout = new FanoutTracker();
   let shardRooms = 0;
   const clients: BenchClient[] = [];
+  const expectedRecipients = Math.max(0, config.CLIENTS_PER_ROOM - 1);
   for (let r = 0; r < config.ROOMS; r++) {
     if (r % config.SHARD_COUNT !== config.SHARD_INDEX) continue;
     shardRooms++;
@@ -96,12 +100,13 @@ async function main(): Promise<void> {
           clientId, roomId, gateways,
           seededRandom(config.SEED * 7919 + r * 1000 + c),
           schedule, recorder, counters,
+          fanout, c, expectedRecipients,
         ));
       } else {
         clients.push(new SimulatedClient(
           clientId, roomId, gateways,
           new YjsReplica(seededRandom(config.SEED * 7919 + r * 1000 + c)),
-          schedule, recorder, counters,
+          schedule, recorder, counters, fanout, c, expectedRecipients,
         ));
       }
     }
@@ -172,6 +177,10 @@ async function main(): Promise<void> {
         serverMetadataBytes: serverMetadata,
         stateMetadataBytes: replicas.metadataBytes + serverMetadata,
       },
+      censoring: {
+        ...fanout.summarize(config.WARMUP_S, config.DURATION_S, config.DRAIN_S),
+        cutoffAtMs: originMs + (config.WARMUP_S + config.DURATION_S + config.DRAIN_S) * 1000,
+      },
       rooms: rooms.length,
       divergedRooms: rooms.filter((r) => r.diverged).length,
       clientsLost,
@@ -209,6 +218,7 @@ async function main(): Promise<void> {
 
   const startMs = preciseNowMs();
   cpuAt = process.cpuUsage();
+  originMs = startMs;
   clients.forEach((c) => c.arm(startMs, config.WARMUP_S, config.DURATION_S));
   injector = new DisconnectInjector(random, {
     ratePerMinute: config.DISCONNECTS_PER_MIN,

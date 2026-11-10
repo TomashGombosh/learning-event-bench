@@ -85,6 +85,18 @@ def test_container_cpu_seconds_sums_positive_deltas(tmp_path: Path):
     assert sample_cell.container_cpu_seconds(tmp_path / "missing.csv") is None
 
 
+def test_kafka_lag_includes_the_sharedb_ops_topic():
+    text = '''
+GROUP TOPIC PARTITION CURRENT-OFFSET LOG-END-OFFSET LAG CONSUMER-ID HOST CLIENT-ID
+ot-gateway sharedb-ops 0 10 25 15 consumer-1 /a a
+'''
+    rows = sample_cell.parse_kafka_lag(text)
+    assert len(rows) == 1
+    assert rows[0]["lag"] == "15"
+    assert rows[0]["log_end"] == "25"
+    assert rows[0]["read_position"] == "10"
+
+
 def test_pubsub_lag_is_not_applicable():
     assert sample_cell.lag_rows("pubsub") == [sample_cell.pubsub_lag_row()]
     assert sample_cell.pubsub_lag_row()["lag"] == "n/a"

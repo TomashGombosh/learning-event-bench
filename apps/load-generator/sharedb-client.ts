@@ -5,6 +5,7 @@ import { ReplicaDigest } from '@domain/reliability';
 import { OT_COLLECTION } from '@adapters/sharedb/constants';
 import { preciseNowMs } from './clock';
 import { ConnectGate, FailoverState, initialFailover, noteFailure, pickGateway } from './gateway-failover';
+import { FanoutTracker } from './fanout-tracker';
 import { LatencyRecorder } from './latency-recorder';
 import { PoissonSchedule } from './poisson-schedule';
 import { Random } from './random';
@@ -27,6 +28,7 @@ interface OpMeta {
   readonly scheduledAtMs: number;
   readonly sentAtMs: number;
   readonly clientId: string;
+  readonly seq: number;
 }
 
 interface ShareDoc {
@@ -84,6 +86,7 @@ export class SharedbClient {
   private lastConnectError: unknown = null;
   private inFlightReconnect: Promise<void> | null = null;
   private window: MeasurementWindow = { fromMs: Number.POSITIVE_INFINITY, toMs: Number.POSITIVE_INFINITY };
+  private seq = 0;
 
   constructor(
     readonly clientId: string,
@@ -93,6 +96,11 @@ export class SharedbClient {
     private readonly schedule: PoissonSchedule,
     private readonly recorder: LatencyRecorder,
     readonly counters: ClientCounters,
+    private readonly fanout: FanoutTracker | null = null,
+    /** Index among the room's clients. The bitmask in FanoutTracker has 31 bits. */
+    private readonly recipientIndex = 0,
+    /** Other clients in the room. A window event delivered to all of them is uncensored. */
+    private readonly expectedRecipients = 0,
   ) {
     this.failover = initialFailover(clientId, gatewayUrls.length);
     installOpHook();
@@ -125,7 +133,12 @@ export class SharedbClient {
     while (burst < 4 && this.schedule.peek() <= nowMs) {
       const scheduledAtMs = this.schedule.advance();
       if (this.online) this.send(scheduledAtMs);
-      else this.counters.skippedWhileOffline++;
+      else {
+        this.counters.skippedWhileOffline++;
+        if (this.inWindow(scheduledAtMs)) {
+          this.fanout?.noteScheduled(this.skipKey(scheduledAtMs), this.expectedRecipients);
+        }
+      }
       burst++;
     }
   }
@@ -187,23 +200,43 @@ export class SharedbClient {
     return typeof text === 'string' ? text : '';
   }
 
+
+  private inWindow(scheduledAtMs: number): boolean {
+    return scheduledAtMs >= this.window.fromMs && scheduledAtMs < this.window.toMs;
+  }
+
+  private eventKey(senderId: string, seq: number): string {
+    return `${this.roomId}	${senderId}	${seq}`;
+  }
+
+  private skipKey(scheduledAtMs: number): string {
+    return `${this.roomId}	${this.clientId}	skip	${scheduledAtMs}`;
+  }
+
   private send(scheduledAtMs: number): void {
     const doc = this.doc;
     if (!doc?.type || typeof doc.data?.text !== 'string') {
       this.counters.skippedWhileOffline++;
+      if (this.inWindow(scheduledAtMs)) {
+        this.fanout?.noteScheduled(this.skipKey(scheduledAtMs), this.expectedRecipients);
+      }
       return;
     }
     const sentAtMs = preciseNowMs();
     this.recorder.recordScheduleLag(sentAtMs - scheduledAtMs);
     const position = Math.floor(this.random() * (doc.data.text.length + 1));
     const ch = ALPHABET[Math.floor(this.random() * ALPHABET.length)];
+    const seq = ++this.seq;
     doc.submitOp([{ p: ['text', position], si: ch }], {
-      source: { scheduledAtMs, sentAtMs, clientId: this.clientId },
+      source: { scheduledAtMs, sentAtMs, clientId: this.clientId, seq },
     }, (error) => {
       if (error) console.error(`ot submit ${this.clientId}`, error);
     });
     this.counters.sent++;
-    if (scheduledAtMs >= this.window.fromMs && scheduledAtMs < this.window.toMs) this.counters.sentInWindow++;
+    if (this.inWindow(scheduledAtMs)) {
+      this.counters.sentInWindow++;
+      this.fanout?.noteScheduled(this.eventKey(this.clientId, seq), this.expectedRecipients);
+    }
   }
 
   private onRemote(meta: OpMeta): void {
@@ -213,7 +246,8 @@ export class SharedbClient {
       return;
     }
     this.counters.received++;
-    if (meta.scheduledAtMs < this.window.fromMs || meta.scheduledAtMs >= this.window.toMs) return;
+    if (!this.inWindow(meta.scheduledAtMs)) return;
+    this.fanout?.noteDelivered(this.eventKey(meta.clientId, meta.seq), this.recipientIndex);
     const now = preciseNowMs();
     const serviceUs = (now - meta.sentAtMs) * 1000;
     if (this.recorder.shouldCapture()) {
