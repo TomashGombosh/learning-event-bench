@@ -8,13 +8,15 @@ on:
         default: c7g.4xlarge
         type: string
       profile:
-        description: smoke (~1h), mmc-smoke (~40min), mmc-e1 (~10h), mmc-e2 (~6h), kafka-rerun, then full. Default never starts a long run.
+        description: smoke (~1h), mmc-smoke (~40min), mmc-e1 (~10h), mmc-e2 (~6h), csa-smoke (~1h), csa-full (~18h), kafka-rerun, then full. Default never starts a long run.
         type: choice
         options:
           - smoke
           - mmc-smoke
           - mmc-e1
           - mmc-e2
+          - csa-smoke
+          - csa-full
           - kafka-rerun
           - cells
           - full
@@ -28,7 +30,7 @@ on:
         default: "5"
         type: string
       bench_duration_s:
-        description: Measurement window in seconds when profile=full or kafka-rerun. Smoke is 60s. mmc-e1 is 240s. mmc-e2 uses the matrix (max 480s); set this to 480 for the watchdog.
+        description: Measurement window in seconds when profile=full, csa-full, or kafka-rerun. smoke and csa-smoke are 60s. mmc-e1 is 240s. mmc-e2 uses the matrix (max 480s); set this to 480 for the watchdog.
         default: "240"
         type: string
   # Optional: weekly start (Saturday 20:00 UTC). Uncomment to enable.
@@ -87,7 +89,12 @@ jobs:
       - name: Validate the MMC matrix
         if: ${{ inputs.profile == 'mmc-smoke' || inputs.profile == 'mmc-e1' || inputs.profile == 'mmc-e2' }}
         working-directory: experiments
-        run: python3 make_matrix.py "${{ inputs.profile }}" --dry-run
+        run: python3 select_matrix.py "${{ inputs.profile }}" --dry-run
+
+      - name: Validate the CSA matrix
+        if: ${{ inputs.profile == 'csa-smoke' || inputs.profile == 'csa-full' }}
+        working-directory: experiments
+        run: python3 select_matrix.py "${{ inputs.profile }}" --dry-run
 
       - name: Validate the cell list
         if: ${{ inputs.profile == 'cells' }}
@@ -96,7 +103,7 @@ jobs:
           CELLS: ${{ inputs.cells }}
         run: |
           # Fail here, before an instance is billed, on a typo or an empty list.
-          python3 make_matrix.py cells "$CELLS" --dry-run
+          python3 select_matrix.py cells --cells "$CELLS" --dry-run
 
       - name: Export Terraform variables
         env:
@@ -116,6 +123,14 @@ jobs:
             full)
               REPS="$BENCH_REPS"
               DURATION="$BENCH_DURATION_S"
+              ;;
+            csa-full)
+              REPS=5
+              DURATION="$BENCH_DURATION_S"
+              ;;
+            csa-smoke)
+              REPS=1
+              DURATION=60
               ;;
             kafka-rerun)
               REPS=1
@@ -138,10 +153,13 @@ jobs:
               # Longest window in the matrix. Each cell still uses its own T.
               DURATION=480
               ;;
-            *)
-              PROFILE=smoke
+            smoke)
               REPS=1
               DURATION=60
+              ;;
+            *)
+              echo "::error::unknown bench profile: $PROFILE"
+              exit 1
               ;;
           esac
           {

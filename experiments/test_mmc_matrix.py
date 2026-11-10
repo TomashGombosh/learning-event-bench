@@ -61,7 +61,9 @@ def test_duration_is_a_matrix_column_and_run_id_suffix(tmp_path: Path):
     out = tmp_path / "matrix.csv"
     make_matrix.write_matrix(rows, str(out))
     text = out.read_text()
-    assert text.splitlines()[0].endswith("duration_s,run_id")
+    header = text.splitlines()[0]
+    assert "duration_s,run_id" in header
+    assert header.endswith("run_id,scheme")
     assert "-T240" in text
     assert "-T60" in text
     parsed = make_matrix.parse_cell_id("004-B-kafka-L6000-nu0-k0-r0-T240")

@@ -83,5 +83,31 @@ export function runEventBusContract(name: string, create: () => Promise<BusUnder
       expect(all.map((s) => s.event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       await sub.unsubscribe();
     });
+
+    it('tail cursor replays only events appended after it', async () => {
+      if (subject.log === null) return;
+      const room = freshRoom();
+      const cursor = await subject.log.tailId(room);
+      for (let i = 1; i <= 3; i++) await subject.bus.publish(eventFor(room, i));
+      let missed: StoredEvent[] = [];
+      const deadline = Date.now() + 15_000;
+      while (missed.length < 3) {
+        if (Date.now() > deadline) throw new Error('timeout waiting for events after the tail cursor');
+        missed = await subject.log.readAfter(room, cursor);
+        if (missed.length < 3) await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(missed.map((s) => s.event.seq)).toEqual([1, 2, 3]);
+      const tail = await subject.log.tailId(room);
+      expect(await subject.log.readAfter(room, tail)).toEqual([]);
+      await subject.bus.publish(eventFor(room, 4));
+      const after: StoredEvent[] = [];
+      const later = Date.now() + 15_000;
+      while (after.length < 1) {
+        if (Date.now() > later) throw new Error('timeout waiting for the event after the new tail');
+        after.push(...await subject.log.readAfter(room, tail));
+        if (after.length < 1) await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(after.map((s) => s.event.seq)).toEqual([4]);
+    });
   });
 }

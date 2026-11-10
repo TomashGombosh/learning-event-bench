@@ -72,6 +72,31 @@ def test_streams_lag_parser_keeps_groups_and_cursor_rows():
     assert rows[1]["lag"] == "0"
 
 
+def test_container_cpu_seconds_sums_positive_deltas(tmp_path: Path):
+    path = tmp_path / "cpu_samples.csv"
+    sample_cell.append_rows(path, sample_cell.CPU_HEADER, [
+        sample_cell.format_cpu_row(1.0, "gateway1", 10.0, None),
+        sample_cell.format_cpu_row(2.0, "gateway1", 10.5, 0.5),
+        sample_cell.format_cpu_row(1.0, "kafka", 4.0, None),
+        sample_cell.format_cpu_row(2.0, "kafka", 3.0, None),  # restart: drop is ignored
+        sample_cell.format_cpu_row(3.0, "kafka", 3.25, 0.25),
+    ])
+    assert sample_cell.container_cpu_seconds(path) == 0.75
+    assert sample_cell.container_cpu_seconds(tmp_path / "missing.csv") is None
+
+
+def test_kafka_lag_includes_the_sharedb_ops_topic():
+    text = '''
+GROUP TOPIC PARTITION CURRENT-OFFSET LOG-END-OFFSET LAG CONSUMER-ID HOST CLIENT-ID
+ot-gateway sharedb-ops 0 10 25 15 consumer-1 /a a
+'''
+    rows = sample_cell.parse_kafka_lag(text)
+    assert len(rows) == 1
+    assert rows[0]["lag"] == "15"
+    assert rows[0]["log_end"] == "25"
+    assert rows[0]["read_position"] == "10"
+
+
 def test_pubsub_lag_is_not_applicable():
     assert sample_cell.lag_rows("pubsub") == [sample_cell.pubsub_lag_row()]
     assert sample_cell.pubsub_lag_row()["lag"] == "n/a"

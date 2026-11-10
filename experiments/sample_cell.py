@@ -26,7 +26,7 @@ from pathlib import Path
 
 CPU_HEADER = "ts,container,cpu_seconds_cumulative,cpu_fraction\n"
 LAG_HEADER = "ts,broker,consumer,partition,log_end,read_position,lag\n"
-COMPOSE_SERVICES = {"redis", "kafka", "gateway1", "gateway2", "gateway3", "loadgen"}
+COMPOSE_SERVICES = {"redis", "kafka", "postgres", "gateway1", "gateway2", "gateway3", "loadgen"}
 
 # One round trip. Groups win when they exist. Otherwise lag is the number of
 # entries strictly after the gateway's last-read id (bench:stream-cursors).
@@ -127,7 +127,7 @@ def parse_kafka_lag(text: str) -> list[dict]:
         if len(parts) < 6:
             continue
         group, topic, partition, current, log_end, lag = parts[:6]
-        if topic != "collab-events":
+        if topic not in ("collab-events", "sharedb-ops"):
             continue
         rows.append({
             "broker": "kafka",
@@ -338,6 +338,34 @@ def lag_rows(broker: str) -> list[dict]:
             "log_end": "n/a", "read_position": "n/a", "lag": "n/a",
         }]
     return [pubsub_lag_row()]
+
+
+def container_cpu_seconds(path: Path) -> float | None:
+    """CPU-seconds in one cell: sum of positive cumulative deltas per container.
+
+    `cpu_seconds_cumulative` is cgroup usage since the container started, so the
+    cell total is the increase across the samples written for that cell.
+    A restart shows up as a drop and is not counted backwards.
+    Returns None when the file is missing or has no numeric rows.
+    """
+    if not path.is_file():
+        return None
+    import csv
+    series: dict[str, list[float]] = {}
+    with path.open(newline="") as handle:
+        for row in csv.DictReader(handle):
+            try:
+                series.setdefault(row["container"], []).append(float(row["cpu_seconds_cumulative"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    if not series:
+        return None
+    total = 0.0
+    for values in series.values():
+        for previous, current in zip(values, values[1:]):
+            if current >= previous:
+                total += current - previous
+    return total
 
 
 def sample_once(out: Path, broker: str, cpu: CpuSampler, ts: float | None = None) -> None:

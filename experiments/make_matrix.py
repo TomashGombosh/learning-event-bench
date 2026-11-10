@@ -25,6 +25,9 @@ Add --dry-run after the arguments to validate and print the plan without writing
 
 The first cell of each broker x scenario is the risky one (highest load, faults on).
 Full and kafka-rerun runs abort if that cell fails the validity gate.
+
+Every row has a scheme column (default yjs). This factorial is not crossed with
+ShareDB; that plan is experiments/make_csa_matrix.py.
 """
 from __future__ import annotations
 
@@ -42,11 +45,16 @@ def rooms_for(load: float) -> int:
     return int(load / (CLIENTS * RATE))
 
 
-def row(stage, broker, load, nu, kill, rep, duration_s=None):
+# The original factorial stays Yjs. The scheme × transport cross is make_csa_matrix.py.
+SCHEMES = ("yjs",)
+
+
+def row(stage, broker, load, nu, kill, rep, duration_s=None, scheme=None):
     """One matrix cell. duration_s is the measurement window T.
 
     Omitted duration follows DURATION_S, or 240 when that is unset. MMC matrices
     pass T explicitly so one plan can mix 60, 120, 240 and 480.
+    scheme defaults to yjs so this factorial is not crossed with ShareDB.
     """
     if duration_s is None:
         raw = os.environ.get("DURATION_S", "")
@@ -56,6 +64,7 @@ def row(stage, broker, load, nu, kill, rep, duration_s=None):
     return dict(
         stage=stage, broker=broker, load=load, rooms=rooms_for(load), clients=CLIENTS, rate=RATE,
         disconnects_per_min=nu, gateway_kill=kill, rep=rep, duration_s=duration,
+        scheme=scheme or SCHEMES[0],
     )
 
 
@@ -237,8 +246,17 @@ def plan_for(argument: str, spec: str = "") -> tuple[str, list[dict]]:
     return "factorial", factorial_rows(int(argument))
 
 
+# duration_s sits before run_id (MMC windows). scheme is last so a header-less
+# reader of an older file still sees run_id before the new trailing column.
+COLUMNS = [
+    "stage", "broker", "load", "rooms", "clients", "rate",
+    "disconnects_per_min", "gateway_kill", "rep", "duration_s", "run_id", "scheme",
+]
+
+
 def write_matrix(rows: list[dict], path: str) -> None:
     for i, item in enumerate(rows):
+        item.setdefault("scheme", "yjs")
         if item.get("run_id"):
             continue  # cells profile: keep the id of the run being replaced
         duration = item.get("duration_s")
@@ -248,7 +266,7 @@ def write_matrix(rows: list[dict], path: str) -> None:
             f"-nu{item['disconnects_per_min']}-k{item['gateway_kill']}-r{item['rep']}{window}"
         )
     with open(path, "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()), lineterminator="\n")
+        writer = csv.DictWriter(handle, fieldnames=COLUMNS, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
