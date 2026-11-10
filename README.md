@@ -103,8 +103,11 @@ inconsistent, and it exits if `run_matrix.sh` no longer emits the `SATURATED` fl
 ```bash
 python3 experiments/make_csa_matrix.py smoke    # 12 cells, or `full` for 180
 ./experiments/run_csa.sh smoke                  # writes the plan, then run_matrix.sh
+python3 experiments/select_matrix.py csa-smoke --dry-run
 npm run complexity
 ```
+
+On AWS, dispatch `bench-up` with `profile=csa-smoke` or `csa-full`. The instance builds `experiments/configs/matrix.csv` through `select_matrix.py`, so ShareDB cells are included.
 
 ## Quick start (no Docker)
 
@@ -138,11 +141,13 @@ On c7g.4xlarge, in this order. Each step is a `bench-up` workflow dispatch. The 
 | MMC | `mmc-smoke` | 6 cells for the overload model: quiet L200 on each transport, kafka and kafka-tuned at L6000 (T=240), streams L6000 at T=60. Fail-fast is on. | about 40 min | `VALIDITY_SUMMARY`, then `cpu_samples.csv` and `lag_samples.csv` in the cell directory. |
 | MMC | `mmc-e1` | Saturation: pubsub, streams, kafka, kafka-tuned × L {200, 1000, 2000, 3000, 3500, 4000, 5000, 6000} × 3 reps, T=240, no faults. 96 cells. | about 9–10 h | Same. A harness `FAIL` on the first cell of a broker aborts. `SATURATED_VALID` does not. |
 | MMC | `mmc-e2` | Window length: kafka and kafka-tuned at L5000 and L6000, streams at L6000 only, T in {60, 120, 240, 480} × 3 reps. 60 cells. | about 5.5–6 h | Same. The matrix carries each T; the workflow duration input is 480 so the watchdog covers the longest cell. |
+| CSA | `csa-smoke` | 12 cells, 60 s window: Yjs and ShareDB × Pub/Sub, Streams, and Kafka-tuned, whiteboard only, both fault levels, one rep. Fail-fast is on. | about 45–60 min | `VALIDITY_SUMMARY`. Confirm ShareDB cells have `scheme=sharedb` and `cpu_samples.csv` / `lag_samples.csv`. |
+| CSA | `csa-full` | 180 cells, 240 s window: the same six alternatives × whiteboard, quiz, and class-chat × both fault levels × 5 reps. Fail-fast is on. | about 17.5–19 h | Same. Criterion distributions for SMAA-TOPSIS come from the five reps. |
 | 2 | `kafka-rerun` | 40 Kafka cells (plain, tuned, `kafka-acks`) at B L3000/L4000/L5000 and C L2500, plus a few C L5000 stress cells. 240 s window. Fail-fast is on. | about 4–5 h | `VALIDITY_SUMMARY` again. A failed canary (the first cell of a broker × scenario) stops the instance. |
 | any | `cells` | Only the cells in the `cells` input: run ids of an earlier matrix and/or presets from `experiments/make_matrix.py` (`rerun-20261018-kafka` = the 25 kafka-tuned L5000 cells of run `20261018T110200Z-c440945`, `rerun-20261018-kafka-reliability` = its 20 stage C cells, `rerun-20261018-streams-c` = the 20 Streams stage C cells). Ids are kept. 240 s window, fail-fast on. | about 7 min per cell plus 15 min | `VALIDITY_SUMMARY`, then `bench-results` with `run_id` = the rerun and `base_run_id` = the run it replaces. The finished cells overwrite the base cells and `results/merged-from.json` lists them. |
 | 3 | `full` | Factorial, `bench_reps=5`, 240 s window. Stage C includes plain kafka and both L2500 and L5000. Fail-fast is on. | about 23 h if every canary passes | `VALIDITY_SUMMARY`, then `bench-results`. |
 
-Fail-fast (`VALIDITY_FAIL_FAST`, default 1 for `kafka-rerun`, `cells`, and `full`, **0 for `smoke`**) aborts after the first cell of a broker × scenario only on a harness fault: attempted rate under 99%, catch-up errors above `VALIDITY_CATCHUP_ERROR_MAX` (default 10), fewer clients connected than expected, a reservoir that does not cover the window while delivery was complete, or a missing shard. A smoke run therefore finishes with `aborted=0` even if some cells are marked `SATURATED_VALID` or `DIVERGED`. That is deliberate: smoke exists to record every risky cell. `SATURATED_VALID` (generator kept up, and delivery fell more than 0.02 below `1 - offline`) is a measured saturation point, not an abort. A shortfall inside that tolerance is `CLIENTS_OFFLINE` on every broker. Pubsub `DIVERGED` is expected, because that broker cannot replay. The instance writes `DONE.json` with `status=aborted_invalid` and a `reason` only when fail-fast fires, then uploads results and shuts down.
+Fail-fast (`VALIDITY_FAIL_FAST`, default 1 for `csa-smoke`, `csa-full`, `mmc-smoke`, `mmc-e1`, `mmc-e2`, `kafka-rerun`, `cells`, and `full`, **0 for `smoke`**) aborts after the first cell of a broker × scenario only on a harness fault: attempted rate under 99%, catch-up errors above `VALIDITY_CATCHUP_ERROR_MAX` (default 10), fewer clients connected than expected, a reservoir that does not cover the window while delivery was complete, or a missing shard. A smoke run therefore finishes with `aborted=0` even if some cells are marked `SATURATED_VALID` or `DIVERGED`. That is deliberate: smoke exists to record every risky cell. `SATURATED_VALID` (generator kept up, and delivery fell more than 0.02 below `1 - offline`) is a measured saturation point, not an abort. A shortfall inside that tolerance is `CLIENTS_OFFLINE` on every broker. Pubsub `DIVERGED` is expected, because that broker cannot replay. The instance writes `DONE.json` with `status=aborted_invalid` and a `reason` only when fail-fast fires, then uploads results and shuts down.
 
 `bench-results` uploads `results/validity.json`, each `results/<run>/shard-*/summary.json`, and each `results/<run>/gateways.log` with the analysis tables.
 
