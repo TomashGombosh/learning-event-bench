@@ -25,10 +25,17 @@ function counters(): ClientCounters {
   return { sent: 0, received: 0, sentInWindow: 0, skippedWhileOffline: 0, catchUpEvents: 0, catchUpUnsupported: 0 };
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+function digestPrefix(client: SharedbClient): string {
+  return client.digest().digest.slice(0, 8);
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs: number, describe?: () => string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
-    if (Date.now() > deadline) throw new Error('timeout waiting for condition');
+    if (Date.now() > deadline) {
+      const detail = describe ? `: ${describe()}` : '';
+      throw new Error(`timeout waiting for condition${detail}`);
+    }
     await new Promise((r) => setTimeout(r, 30));
   }
 }
@@ -102,14 +109,35 @@ live('ShareDB cell on real transports', () => {
         right.startGenerating();
         left.sendDue(1e12);
         right.sendDue(1e12);
-        await waitFor(() => left.digest().digest === right.digest().digest && leftCounts.sent + rightCounts.sent > 0, 15_000);
+        await waitFor(
+          () => left.digest().digest === right.digest().digest && leftCounts.sent + rightCounts.sent > 0,
+          15_000,
+          () => `initial convergence left=${digestPrefix(left)} right=${digestPrefix(right)} sent=${leftCounts.sent + rightCounts.sent}`,
+        );
         right.disconnect();
         left.sendDue(1e15);
         await first.kill();
+        // The websocket close is async. If we subscribe the offline client
+        // immediately, getOps can run before the killed gateway finishes
+        // in-flight commits and before the surviving client failovers and
+        // resends. Redis Pub/Sub will not replay a message published in
+        // that window. The killed URL is also cooled down for 30s.
+        await waitFor(
+          () => !left.isOnline,
+          10_000,
+          () => 'left did not observe the gateway kill',
+        );
+        await waitFor(
+          () => left.isOnline,
+          60_000,
+          () => 'left did not come back online on the surviving gateway',
+        );
         await right.reconnect();
-        await waitFor(() => {
-          return left.isOnline && right.isOnline && left.digest().digest === right.digest().digest;
-        }, 25_000);
+        await waitFor(
+          () => left.isOnline && right.isOnline && left.digest().digest === right.digest().digest,
+          30_000,
+          () => `leftOnline=${left.isOnline} rightOnline=${right.isOnline} left=${digestPrefix(left)} right=${digestPrefix(right)} catchUp=${rightCounts.catchUpEvents} received=${rightCounts.received}`,
+        );
         expect(left.digest().digest).toBe(right.digest().digest);
         expect(rightCounts.catchUpEvents + rightCounts.received).toBeGreaterThan(0);
       } finally {
