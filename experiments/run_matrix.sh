@@ -304,7 +304,8 @@ while IFS=$'\t' read -r stage broker load rooms clients rate nu kill rep run_id 
   rm -rf "results/$run_id"
   mkdir -p "results/$run_id"
   if prepare_brokers; then
-    if ! docker compose up -d --no-build --force-recreate --no-deps \
+    if ! timeout -k 20s "$COMPOSE_UP_TIMEOUT_S" \
+        docker compose up -d --no-build --force-recreate --no-deps --wait \
         gateway1 gateway2 gateway3 </dev/null > "results/$run_id/compose-up.log" 2>&1; then
       echo "cell $run_id failed: gateway recreate failed" | tee "results/$run_id/cell-failed.txt" >&2
       brokers_ready=0

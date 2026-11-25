@@ -14,6 +14,7 @@ export interface OtStateSource {
 export function attachOtServer(server: Server, backend: { listen(stream: unknown): void }): { close(): Promise<void> } {
   const wss = new WebSocketServer({ server, path: '/sharedb' });
   wss.on('connection', (ws) => {
+    ws.on('error', () => undefined);
     const stream = new WebSocketJSONStream(ws);
     // A client that just dropped (netem, gateway kill) must not throw out of
     // the pubsub fanout. The JSON stream reports a closed socket via the
