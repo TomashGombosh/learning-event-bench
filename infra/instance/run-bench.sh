@@ -58,7 +58,9 @@ if [ -z "${SHARDS+x}" ]; then
 fi
 export SHARDS
 export CPUSET_GATEWAYS="${CPUSET_GATEWAYS:-${CPUSET_GATEWAY1}}"
-echo "cpu split: gateway1=${CPUSET_GATEWAY1} gateway2=${CPUSET_GATEWAY2} gateway3=${CPUSET_GATEWAY3} redis=${CPUSET_REDIS} kafka=${CPUSET_KAFKA} loadgen=${CPUSET_LOADGEN} (${LOADGEN_CPUS} cores, ${SHARDS} shards)"
+# The shared OT database sits on the Redis cores. Gateway cores stay clear of it.
+export CPUSET_POSTGRES="${CPUSET_POSTGRES:-${CPUSET_REDIS}}"
+echo "cpu split: gateway1=${CPUSET_GATEWAY1} gateway2=${CPUSET_GATEWAY2} gateway3=${CPUSET_GATEWAY3} redis=${CPUSET_REDIS} postgres=${CPUSET_POSTGRES} kafka=${CPUSET_KAFKA} loadgen=${CPUSET_LOADGEN} (${LOADGEN_CPUS} cores, ${SHARDS} shards)"
 
 write_meta() {
   cat > results/run-metadata.json <<JSON
@@ -95,12 +97,26 @@ trap on_exit EXIT
 /opt/leb/sync-results.sh
 # shellcheck source=experiments/lib/budget.sh
 source "$REPO/experiments/lib/budget.sh"
-# Default is smoke. A dispatch that does not set BENCH_PROFILE=full must not start the long run.
-# kafka-rerun is the ~40 cell Kafka plan. full and kafka-rerun abort when the first cell of a
-# broker x scenario is a harness fault (VALIDITY_FAIL_FAST=0 disables that).
-# Smoke leaves fail-fast off on purpose, so VALIDITY_SUMMARY reports aborted=0 after every cell.
+# Default is smoke. A dispatch that does not set an explicit long profile must not
+# start a long run. Unknown names fail; they must not fall through to the Yjs smoke
+# or the factorial. CSA and most long profiles abort on a harness fault
+# (VALIDITY_FAIL_FAST=0 disables that). The Yjs smoke leaves fail-fast off on purpose.
 profile="${BENCH_PROFILE:-smoke}"
 case "$profile" in
+  smoke)
+    BENCH_DURATION_S=60
+    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-0}"
+    echo "profile=smoke: 17 Yjs cells, 60s measurement window, fail-fast=off"
+    ;;
+  csa-smoke)
+    BENCH_DURATION_S=60
+    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
+    echo "profile=csa-smoke: 12 scheme x transport cells, 60s window, fail-fast=on"
+    ;;
+  csa-full)
+    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
+    echo "profile=csa-full: 180 CSA cells duration=${BENCH_DURATION_S}s fail-fast=on"
+    ;;
   full)
     echo "profile=full: reps=${BENCH_REPS} duration=${BENCH_DURATION_S}s fail-fast=on"
     VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
@@ -132,10 +148,8 @@ case "$profile" in
     VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-1}"
     ;;
   *)
-    profile=smoke
-    BENCH_DURATION_S=60
-    VALIDITY_FAIL_FAST="${VALIDITY_FAIL_FAST:-0}"
-    echo "profile=smoke: 17 cells, 60s measurement window, fail-fast=off"
+    echo "unknown bench profile: $profile" >&2
+    exit 1
     ;;
 esac
 export BENCH_PROFILE="$profile"
@@ -168,20 +182,12 @@ if ! docker compose build gateway1; then
   echo "docker compose build failed"
   exit 1
 fi
-case "$profile" in
-  smoke) (cd experiments && python3 make_matrix.py smoke) ;;
-  kafka-rerun) (cd experiments && python3 make_matrix.py kafka-rerun) ;;
-  mmc-smoke) (cd experiments && python3 make_matrix.py mmc-smoke) ;;
-  mmc-e1) (cd experiments && python3 make_matrix.py mmc-e1) ;;
-  mmc-e2) (cd experiments && python3 make_matrix.py mmc-e2) ;;
-  cells)
-    if ! (cd experiments && python3 make_matrix.py cells "${BENCH_CELLS}"); then
-      echo "make_matrix rejected BENCH_CELLS=${BENCH_CELLS}"
-      exit 1
-    fi
-    ;;
-  *) (cd experiments && python3 make_matrix.py "${BENCH_REPS}") ;;
-esac
+# One entry point writes experiments/configs/matrix.csv for every profile,
+# including csa-smoke / csa-full (make_csa_matrix.py, Yjs and ShareDB).
+if ! (cd experiments && python3 select_matrix.py "$profile" --cells "${BENCH_CELLS:-}" --reps "${BENCH_REPS:-5}"); then
+  echo "select_matrix rejected profile=${profile} BENCH_CELLS=${BENCH_CELLS:-}"
+  exit 1
+fi
 cells="$(tail -n +2 experiments/configs/matrix.csv | grep -c . || true)"
 # MMC E2 mixes windows. The watchdog uses the longest duration_s in the matrix,
 # not the profile default, so a 480s cell is not killed by a 240s budget.

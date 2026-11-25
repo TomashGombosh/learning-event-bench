@@ -45,6 +45,10 @@ enforced by `test/architecture/dependency-rule.test.ts`.
 4. Receivers apply the Yjs update and record `T = received − scheduled` (same process clock, no clock skew).
 5. On reconnect a client sends its last seen event id; `CatchUpAfterReconnectUseCase` replays missed events
    (Redis Streams: `XRANGE`; Kafka: short-lived consumer seeking the room partition; Pub/Sub: unsupported).
+   A first join sends null. The gateway does not page the log (that opened a Kafka consumer group per
+   client). It returns the current tail id as `cursor`. The client stores that id, so an outage before
+   any live event still has a cursor and the events after it are replayed. An empty log's cursor is the
+   start of the log (`0` in memory, `0-0` on Streams, `${partition}--1` on Kafka).
 6. Clients keep an outbox of unacknowledged operations and re-send them after reconnecting
    (Yjs updates are idempotent, so duplicates are harmless). Each client starts on
    `hash(clientId) % N` of `GATEWAY_URLS`. A dropped session leaves that URL for 30 s
@@ -52,6 +56,58 @@ enforced by `test/architecture/dependency-rule.test.ts`.
    gateways, with a cap of 32 handshakes in flight, until one accepts.
 7. At the end, every replica reports a SHA-256 digest of its text. A room has diverged if those digests
    disagree, or if any of its clients is offline (`clients_lost`). See the definition of R above.
+   `rooms.csv` and `replicas.csv` use the same columns for Yjs and ShareDB.
+
+### Operational Transformation (ShareDB)
+
+`SCHEME=sharedb` runs ShareDB (MIT) with the json0 text type (`{text: ""}`) instead of Yjs.
+The ShareDB server is the gateway. Simulated clients use `sharedb/lib/client` on a websocket at
+`/sharedb` on the same gateway port. **The default OT component is one shared Postgres database
+(`sharedb-postgres`) for every gateway.** Docker Compose starts that database and applies
+`infra/postgres/structure.sql`. Catch-up is `subscribe` / `fetch` against that op log. It is not a
+Redis `XRANGE` or a Kafka replay. When a gateway sees a pubsub op whose version skips ahead, it
+reads the missing ops from Postgres and forwards them locally before the newer one.
+`OT_DB=memory` is the per-gateway `MemoryDB` ablation: that process has no other copy of an op, so
+a missed pubsub message stays missing. The ablation still projects ops into its local log.
+
+Inter-gateway propagation is a ShareDB PubSub: `sharedb-redis-pubsub` for Redis Pub/Sub, and
+in-tree adapters for Redis Streams and Kafka (KafkaJS, the same producer settings as the Yjs
+transport, including `kafka-tuned`: acks=1, idempotent off). Those adapters start at the tail.
+`BROKER=memory` is in-process only and does not cross gateway processes. `SCHEME=sharedb` does
+not also start the Yjs broker.
+
+Timing rides in ShareDB `x.source` (`scheduledAtMs`, `sentAtMs`, `clientId`). Service latency is
+`received − sentAtMs` on the sender's clock. Ops applied before the subscribe callback are
+catch-up and are not latency samples. A reconnect uses `bindToSocket`, so an unacknowledged op
+keeps its `src`/`seq` and is not submitted again.
+
+`summary.json` `resources` still records load-generator process CPU. The cell line
+`cpu_s_per_1000` prefers `results/<run>/cpu_samples.csv` (the PR #21 sampler: one row per second
+per container, cgroup `usage_usec`, positive deltas summed, `cpu_source=containers`). A cell with
+no sample file falls back to the load-generator process (`cpu_source=loadgen`). State metadata
+bytes are Yjs document state minus the UTF-8 text, or the Postgres op-log JSON minus inserted
+characters (`GET /bench/state`) plus client text. `npm run complexity` prints LOC
+(no tests, no comments) and ESLint cyclomatic complexity per adapter directory. The Redis Pub/Sub
+OT adapter is the npm package `sharedb-redis-pubsub`, so it has no in-tree LOC.
+
+### CSA matrix (scheme × transport)
+
+`experiments/csa_profiles.py` is the only place the three provisional profiles are defined:
+whiteboard n=20, 5 events/s/user, L=2500; quiz n=30, 0.2 events/s/user; class chat n=50,
+0.5 events/s/user. The cross is 6 alternatives (Yjs, ShareDB) × (Pub/Sub, Streams, Kafka-tuned)
+× 3 profiles × 2 fault levels (ν=0; ν=1/min and a gateway kill) × 5 reps = 180 cells, seed
+`20261021`. Smoke is 12 cells (whiteboard, one rep, both fault levels). Both CSA modes set
+`VALIDITY_FAIL_FAST=1`. The generator exits before writing a plan that is internally
+inconsistent, and it exits if `run_matrix.sh` no longer emits the `SATURATED` flag.
+
+```bash
+python3 experiments/make_csa_matrix.py smoke    # 12 cells, or `full` for 180
+./experiments/run_csa.sh smoke                  # writes the plan, then run_matrix.sh
+python3 experiments/select_matrix.py csa-smoke --dry-run
+npm run complexity
+```
+
+On AWS, dispatch `bench-up` with `profile=csa-smoke` or `csa-full`. The instance builds `experiments/configs/matrix.csv` through `select_matrix.py`, so ShareDB cells are included.
 
 ## Quick start (no Docker)
 
@@ -85,11 +141,13 @@ On c7g.4xlarge, in this order. Each step is a `bench-up` workflow dispatch. The 
 | MMC | `mmc-smoke` | 6 cells for the overload model: quiet L200 on each transport, kafka and kafka-tuned at L6000 (T=240), streams L6000 at T=60. Fail-fast is on. | about 40 min | `VALIDITY_SUMMARY`, then `cpu_samples.csv` and `lag_samples.csv` in the cell directory. |
 | MMC | `mmc-e1` | Saturation: pubsub, streams, kafka, kafka-tuned × L {200, 1000, 2000, 3000, 3500, 4000, 5000, 6000} × 3 reps, T=240, no faults. 96 cells. | about 9–10 h | Same. A harness `FAIL` on the first cell of a broker aborts. `SATURATED_VALID` does not. |
 | MMC | `mmc-e2` | Window length: kafka and kafka-tuned at L5000 and L6000, streams at L6000 only, T in {60, 120, 240, 480} × 3 reps. 60 cells. | about 5.5–6 h | Same. The matrix carries each T; the workflow duration input is 480 so the watchdog covers the longest cell. |
+| CSA | `csa-smoke` | 12 cells, 60 s window: Yjs and ShareDB × Pub/Sub, Streams, and Kafka-tuned, whiteboard only, both fault levels, one rep. Fail-fast is on. | about 45–60 min | `VALIDITY_SUMMARY`. Confirm ShareDB cells have `scheme=sharedb` and `cpu_samples.csv` / `lag_samples.csv`. |
+| CSA | `csa-full` | 180 cells, 240 s window: the same six alternatives × whiteboard, quiz, and class-chat × both fault levels × 5 reps. Fail-fast is on. | about 17.5–19 h | Same. Criterion distributions for SMAA-TOPSIS come from the five reps. |
 | 2 | `kafka-rerun` | 40 Kafka cells (plain, tuned, `kafka-acks`) at B L3000/L4000/L5000 and C L2500, plus a few C L5000 stress cells. 240 s window. Fail-fast is on. | about 4–5 h | `VALIDITY_SUMMARY` again. A failed canary (the first cell of a broker × scenario) stops the instance. |
 | any | `cells` | Only the cells in the `cells` input: run ids of an earlier matrix and/or presets from `experiments/make_matrix.py` (`rerun-20261018-kafka` = the 25 kafka-tuned L5000 cells of run `20261018T110200Z-c440945`, `rerun-20261018-kafka-reliability` = its 20 stage C cells, `rerun-20261018-streams-c` = the 20 Streams stage C cells). Ids are kept. 240 s window, fail-fast on. | about 7 min per cell plus 15 min | `VALIDITY_SUMMARY`, then `bench-results` with `run_id` = the rerun and `base_run_id` = the run it replaces. The finished cells overwrite the base cells and `results/merged-from.json` lists them. |
 | 3 | `full` | Factorial, `bench_reps=5`, 240 s window. Stage C includes plain kafka and both L2500 and L5000. Fail-fast is on. | about 23 h if every canary passes | `VALIDITY_SUMMARY`, then `bench-results`. |
 
-Fail-fast (`VALIDITY_FAIL_FAST`, default 1 for `kafka-rerun`, `cells`, and `full`, **0 for `smoke`**) aborts after the first cell of a broker × scenario only on a harness fault: attempted rate under 99%, catch-up errors above `VALIDITY_CATCHUP_ERROR_MAX` (default 10), fewer clients connected than expected, a reservoir that does not cover the window while delivery was complete, or a missing shard. A smoke run therefore finishes with `aborted=0` even if some cells are marked `SATURATED_VALID` or `DIVERGED`. That is deliberate: smoke exists to record every risky cell. `SATURATED_VALID` (generator kept up, and delivery fell more than 0.02 below `1 - offline`) is a measured saturation point, not an abort. A shortfall inside that tolerance is `CLIENTS_OFFLINE` on every broker. Pubsub `DIVERGED` is expected, because that broker cannot replay. The instance writes `DONE.json` with `status=aborted_invalid` and a `reason` only when fail-fast fires, then uploads results and shuts down.
+Fail-fast (`VALIDITY_FAIL_FAST`, default 1 for `csa-smoke`, `csa-full`, `mmc-smoke`, `mmc-e1`, `mmc-e2`, `kafka-rerun`, `cells`, and `full`, **0 for `smoke`**) aborts after the first cell of a broker × scenario only on a harness fault: attempted rate under 99%, catch-up errors above `VALIDITY_CATCHUP_ERROR_MAX` (default 10), fewer clients connected than expected, a reservoir that does not cover the window while delivery was complete, or a missing shard. A smoke run therefore finishes with `aborted=0` even if some cells are marked `SATURATED_VALID` or `DIVERGED`. That is deliberate: smoke exists to record every risky cell. `SATURATED_VALID` (generator kept up, and delivery fell more than 0.02 below `1 - offline`) is a measured saturation point, not an abort. A shortfall inside that tolerance is `CLIENTS_OFFLINE` on every broker. Pubsub `DIVERGED` is expected, because that broker cannot replay. The instance writes `DONE.json` with `status=aborted_invalid` and a `reason` only when fail-fast fires, then uploads results and shuts down.
 
 `bench-results` uploads `results/validity.json`, each `results/<run>/shard-*/summary.json`, and each `results/<run>/gateways.log` with the analysis tables.
 
@@ -99,6 +157,8 @@ See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Ac
 
 | Component | Variable | Default | Meaning |
 |---|---|---|---|
+| gateway | `SCHEME` | `yjs` | `yjs` or `sharedb`. ShareDB does not start the Yjs broker |
+| gateway | `OT_DB` | `postgres` | Shared op log. `memory` is the per-gateway ablation |
 | gateway | `BROKER` | `memory` | `memory`, `pubsub`, `streams`, `kafka` (acks=all, idempotent), `kafka-tuned` (acks=1), `kafka-acks` (acks=all, not idempotent) |
 | gateway | `STREAM_MAXLEN` | `10000` | Redis Streams replay window *L* |
 | gateway | `KAFKA_PARTITIONS` | `12` | partitions of topic `collab-events` |
@@ -122,6 +182,8 @@ See [docs/AUTOMATION.md](docs/AUTOMATION.md) for fully automated runs (GitHub Ac
 - WebSocket runs over TCP, so `netem` packet loss turns into delay rather than lost events; divergence is
   produced by disconnects and gateway failures (see the reliability model).
 - Latency of re-sent outbox operations is measured from their original scheduled time (time-to-visibility).
+- ShareDB pubsub adapters start at the tail. With `OT_DB=postgres` a missed version is read back from the shared op log. With `OT_DB=memory` (the ablation) a missed pubsub message is gone. A killed gateway is not restarted.
+- CPU seconds are the load-generator process, not the gateway processes. Quiz and class-chat aggregate loads are provisional (`experiments/csa_profiles.py`).
 
 ## Citing
 

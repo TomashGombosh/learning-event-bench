@@ -49,6 +49,15 @@ export class YjsReplica {
     return pool;
   }
 
+  /** CRDT bytes beyond the visible text. The op log equivalent lives inside the document. */
+  stateStats(): { textBytes: number; stateBytes: number; metadataBytes: number } {
+    this.flush();
+    const text = this.text.toString();
+    const textBytes = Buffer.byteLength(text);
+    const stateBytes = Y.encodeStateAsUpdate(this.doc).byteLength;
+    return { textBytes, stateBytes, metadataBytes: Math.max(0, stateBytes - textBytes) };
+  }
+
   /** Digest of the visible state; replicas that missed an update end with a different digest. */
   digest(): string {
     this.flush();

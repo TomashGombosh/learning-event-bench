@@ -56,5 +56,9 @@ jobs:
             results/merged-from.json
             results/validity.json
             results/*/shard-*/summary.json
+            results/*/shard-*/rooms.csv
+            results/*/cpu_samples.csv
+            results/*/lag_samples.csv
+            results/*/cell-failed.txt
             results/*/gateways.log
           if-no-files-found: warn

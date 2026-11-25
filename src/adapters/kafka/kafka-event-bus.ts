@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { groupJoined } from './group-join';
 import { Admin, Consumer, Kafka, logLevel, Producer } from 'kafkajs';
 import { CollabEvent, EventId, StoredEvent } from '@domain/collab-event';
 import { EventBusPort, EventHandler, Subscription } from '@application/ports/event-bus.port';
@@ -112,6 +113,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
     const inFlight = this.options.maxInFlight === null ? 'unlimited' : String(this.options.maxInFlight);
     console.log(`producer idempotent=${this.options.idempotent} acks=${this.options.acks} maxInFlight=${inFlight}`);
     await this.consumer.subscribe({ topic: this.options.topic, fromBeginning: false });
+    const joined = groupJoined(this.consumer);
     await this.consumer.run({
       eachBatchAutoResolve: true,
       eachBatch: async ({ batch, heartbeat }) => {
@@ -128,6 +130,7 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
         if (batch.messages.length > 0) await heartbeat();
       },
     });
+    await joined;
   }
 
   async publish(event: CollabEvent): Promise<EventId> {
@@ -151,6 +154,17 @@ export class KafkaEventBus implements EventBusPort, ReplayableEventLogPort {
    * Recent catch-up is a slice of the live consumer's ring (no extra group join).
    * `consumeRange` runs only when that ring does not cover the requested offset.
    */
+  /**
+   * High watermark minus one. An empty partition returns `${partition}--1`,
+   * so the next `readAfter` starts at offset 0 without a consumer group.
+   */
+  async tailId(roomId: string): Promise<EventId> {
+    const partition = partitionOf(roomId, this.partitions);
+    const offsets = await this.admin.fetchTopicOffsets(this.options.topic);
+    const high = BigInt(offsets.find((entry) => entry.partition === partition)!.high);
+    return kafkaEventId(partition, (high - 1n).toString());
+  }
+
   async readAfter(roomId: string, lastId: EventId | null, limit?: number): Promise<StoredEvent[]> {
     const partition = partitionOf(roomId, this.partitions);
     // Do not compare the ring to the high watermark. Under load the watermark moves

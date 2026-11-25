@@ -384,9 +384,16 @@ def load_state(path: Path) -> dict:
     return data
 
 
-def record_cell(state: dict, verdict: CellVerdict, *, fail_fast: bool) -> int:
+def group_key(stage: str, broker: str, scheme: str = "") -> str:
+    """Fail-fast group. A non-empty scheme keeps Yjs and ShareDB canaries apart."""
+    if scheme:
+        return f"{stage}|{scheme}|{broker}"
+    return f"{stage}|{broker}"
+
+
+def record_cell(state: dict, verdict: CellVerdict, *, fail_fast: bool, scheme: str = "") -> int:
     """Remember the cell. Returns 42 when this is the first cell of its group and it failed."""
-    group = f"{verdict.stage}|{verdict.broker}"
+    group = group_key(verdict.stage, verdict.broker, scheme)
     first = group not in state["groups_seen"]
     if first:
         state["groups_seen"].append(group)

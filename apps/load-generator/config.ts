@@ -3,6 +3,7 @@ import { z } from 'zod';
 const schema = z.object({
   GATEWAY_URLS: z.string().default('http://localhost:3000'),
   RUN_ID: z.string().default(() => `run-${Date.now()}`),
+  SCHEME: z.enum(['yjs', 'sharedb']).default('yjs'),
   BROKER_LABEL: z.string().default('unknown'),
   ROOMS: z.coerce.number().int().positive().default(5),
   CLIENTS_PER_ROOM: z.coerce.number().int().min(2).default(5),

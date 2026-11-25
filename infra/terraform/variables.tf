@@ -33,13 +33,16 @@ variable "git_ref" {
 }
 
 variable "bench_profile" {
-  description = "smoke = 17 cells x 60s (default, ~45-60 min). kafka-rerun = ~40 Kafka cells. cells = only bench_cells. full = factorial using bench_reps and bench_duration_s."
+  description = "smoke = 17 Yjs cells x 60s (default, ~45-60 min). mmc-smoke / mmc-e1 / mmc-e2 = overload matrices. csa-smoke = 12 scheme x transport cells x 60s. csa-full = 180 CSA cells x 240s. kafka-rerun = ~40 Kafka cells. cells = only bench_cells. full = Yjs factorial using bench_reps and bench_duration_s."
   type        = string
   default     = "smoke"
 
   validation {
-    condition     = contains(["smoke", "kafka-rerun", "cells", "full"], var.bench_profile)
-    error_message = "bench_profile must be smoke, kafka-rerun, cells, or full."
+    condition = contains([
+      "smoke", "mmc-smoke", "mmc-e1", "mmc-e2",
+      "csa-smoke", "csa-full", "kafka-rerun", "cells", "full",
+    ], var.bench_profile)
+    error_message = "bench_profile must be smoke, mmc-smoke, mmc-e1, mmc-e2, csa-smoke, csa-full, kafka-rerun, cells, or full."
   }
 }
 
@@ -61,7 +64,7 @@ variable "bench_reps" {
 }
 
 variable "bench_duration_s" {
-  description = "Measurement window per run, seconds, when bench_profile is full or kafka-rerun. Smoke forces 60s."
+  description = "Measurement window per run, seconds, when bench_profile is full, csa-full, or kafka-rerun. smoke and csa-smoke force 60s. mmc-e1 is 240s. mmc-e2 uses the matrix (max 480s)."
   type        = number
   default     = 240
 }
