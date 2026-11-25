@@ -1,20 +1,28 @@
 """Per-cell validity gate.
 
 FAIL is a harness fault, and it is the only status that fail-fast aborts on:
-the generator attempted under 99% of the offered rate, catch-up errors exceed
-the threshold, fewer clients connected than the cell asked for, the reservoir
-does not cover the window even though delivery was complete (recorder bug),
-or shard summaries are missing.
+- Missing or incomplete shard summaries (shard crash, timeout, or missing files),
+- Fewer clients connected at start than the cell asked for,
+- Catch-up errors in gateways.log exceeding the threshold,
+- A latency reservoir that stops early despite complete delivery (recorder bug),
+- Generator median schedule lag exceeding SCHEDULE_LAG_P50_MAX_MS (250 ms), indicating
+  loadgen CPU starvation / timer drift on the generator's own event loop, or
+- Generator attempted rate falling below HARNESS_ATTEMPTED_FLOOR (0.99) when the SUT
+  is not saturated, or below SATURATED_ATTEMPTED_FLOOR (0.50) under SUT saturation.
 
-A cell whose generator kept up (attempted >= 0.99) while delivery fell more than
-OFFLINE_DELIVERY_TOLERANCE below (1 - offline) is SATURATED_VALID: the broker,
-not the clients that were offline. It is kept for throughput analysis and left
-out of latency percentiles. It does not abort the run. A shortfall inside that
-tolerance is CLIENTS_OFFLINE on every broker. Pubsub divergence is expected
-(that broker cannot replay) and is a flag only.
+A cell whose loadgen health signals are intact (all shards present and complete,
+all clients connected, median generator schedule lag <= 250 ms, attempted >= 0.99
+or >= 0.50 under genuine SUT saturation, catch-up errors within bound) while
+delivery fell more than OFFLINE_DELIVERY_TOLERANCE below (1 - offline) is
+SATURATED_VALID: genuine SUT saturation, recorded as a valid measured outcome.
+It is kept for throughput/CSA analysis, excluded from non-saturated latency
+summaries, and does not abort the run. A shortfall inside that tolerance is
+CLIENTS_OFFLINE on every broker. Pubsub divergence is expected (no replay) and
+is a flag only.
 
 profile=smoke sets VALIDITY_FAIL_FAST=0, so a smoke run records every cell and
-writes aborted=0 even when a cell FAILs. kafka-rerun and full default it to 1.
+writes aborted=0 even when a cell FAILs. csa-smoke, csa-full, kafka-rerun and
+full default it to 1.
 """
 from __future__ import annotations
 
@@ -31,6 +39,11 @@ CATCHUP_NEEDLES = (
 DELIVERY_FLOOR = 0.99
 # Harness fault: the generator itself did not attempt the offered load.
 HARNESS_ATTEMPTED_FLOOR = 0.99
+# Under genuine SUT saturation (backpressure/reconnects), allow attempted >= 50%
+# as long as median generator schedule lag stays healthy (<= SCHEDULE_LAG_P50_MAX_MS).
+SATURATED_ATTEMPTED_FLOOR = 0.50
+# Matches apps/load-generator/load-report.ts generator schedule lag threshold.
+SCHEDULE_LAG_P50_MAX_MS = 250.0
 OFFLINE_FLAG = 0.05
 # Delivery this far below (1 - offline) is the broker, not clients that were offline.
 OFFLINE_DELIVERY_TOLERANCE = 0.02
@@ -69,6 +82,8 @@ class CellObservation:
     hdr_count: int = 0
     catchup_errors: int = 0
     shard_missing: bool = False
+    incomplete: bool = False
+    schedule_lag_p50_ms: float = 0.0
 
 
 @dataclass
@@ -85,6 +100,7 @@ class CellVerdict:
     catchup_errors: int = 0
     clients_connected: int = 0
     clients_expected: int = 0
+    schedule_lag_p50_ms: float = 0.0
 
     def line(self) -> str:
         marks = self.failures + [flag for flag in self.flags if flag not in self.failures]
@@ -94,7 +110,8 @@ class CellVerdict:
             f"delivery={self.delivery_ratio:.3f} attempted={self.attempted_ratio:.3f} "
             f"offline={self.offline_fraction:.3f} "
             f"connected={self.clients_connected}/{self.clients_expected} "
-            f"catchup_errors={self.catchup_errors}{suffix}"
+            f"catchup_errors={self.catchup_errors} "
+            f"lag_p50={self.schedule_lag_p50_ms:.1f}ms{suffix}"
         )
 
 
@@ -120,16 +137,22 @@ def broker_saturated(
     attempted_ratio: float,
     *,
     shard_missing: bool = False,
+    incomplete: bool = False,
+    schedule_lag_p50_ms: float = 0.0,
 ) -> bool:
-    """Generator kept up, and delivery is below what the online clients should have received.
+    """Loadgen health signals passed, and delivery fell below what online clients should receive.
 
     Expected delivery is (1 - offline). A gap larger than OFFLINE_DELIVERY_TOLERANCE is
-    broker saturation. The same comparison applies to every broker, including pubsub.
+    SUT saturation. When the SUT is saturated, attempted_ratio down to SATURATED_ATTEMPTED_FLOOR
+    (0.50) is still accepted as SATURATED_VALID provided all shards completed and median
+    generator schedule lag stayed <= SCHEDULE_LAG_P50_MAX_MS (250 ms).
     """
-    if shard_missing or attempted_ratio < HARNESS_ATTEMPTED_FLOOR:
+    if shard_missing or incomplete or _finite(schedule_lag_p50_ms) > SCHEDULE_LAG_P50_MAX_MS:
         return False
     floor = expected_delivery(offline_fraction) - OFFLINE_DELIVERY_TOLERANCE
-    return delivery_ratio < floor
+    if delivery_ratio >= floor:
+        return False
+    return attempted_ratio >= SATURATED_ATTEMPTED_FLOOR
 
 
 def loss_explained_by_offline(delivery_ratio: float, offline_fraction: float) -> bool:
@@ -146,6 +169,8 @@ def _saturated_valid(obs: CellObservation, attempted_ratio: float) -> bool:
         obs.offline_fraction,
         attempted_ratio,
         shard_missing=obs.shard_missing,
+        incomplete=obs.incomplete,
+        schedule_lag_p50_ms=obs.schedule_lag_p50_ms,
     )
 
 
@@ -158,8 +183,15 @@ def assess_cell(obs: CellObservation, *, catchup_error_max: int = 10) -> CellVer
 
     if obs.shard_missing:
         failures.append("MISSING")
+    if obs.incomplete:
+        failures.append("INCOMPLETE")
+    if _finite(obs.schedule_lag_p50_ms) > SCHEDULE_LAG_P50_MAX_MS:
+        failures.append("GENERATOR_LAG")
     if offered > 0 and attempted_ratio < HARNESS_ATTEMPTED_FLOOR:
-        failures.append("ATTEMPTED")
+        if not saturated_valid:
+            failures.append("ATTEMPTED")
+        else:
+            flags.append("ATTEMPTED_BELOW_FLOOR")
     if obs.catchup_errors > catchup_error_max:
         failures.append("CATCHUP_ERRORS")
     if obs.clients_expected > 0 and obs.clients_connected < obs.clients_expected:
@@ -216,6 +248,7 @@ def assess_cell(obs: CellObservation, *, catchup_error_max: int = 10) -> CellVer
         catchup_errors=obs.catchup_errors,
         clients_connected=obs.clients_connected,
         clients_expected=obs.clients_expected,
+        schedule_lag_p50_ms=_finite(obs.schedule_lag_p50_ms),
     )
 
 
@@ -271,6 +304,8 @@ def load_observation(
     connected = 0
     expected_clients = 0
     p50 = p75 = p99 = 0.0
+    schedule_lag_p50 = 0.0
+    incomplete = False
     hdr_count = 0
     span_min = math.inf
     span_max = -math.inf
@@ -292,7 +327,11 @@ def load_observation(
         rooms_total += int(summary.get("rooms") or 0)
         connected += int(summary.get("clientsConnected") or 0)
         expected_clients += int(summary.get("clientsExpected") or 0)
+        if bool(summary.get("incomplete")):
+            incomplete = True
         latency = summary.get("latency") or {}
+        shard_lag_p50 = float(latency.get("scheduleLagP50Ms") or load_block.get("scheduleLagP50Ms") or 0)
+        schedule_lag_p50 = max(schedule_lag_p50, shard_lag_p50)
         shard_p50 = float(latency.get("p50Ms") or 0)
         if shard_p50 >= p50:
             p50 = shard_p50
@@ -346,6 +385,8 @@ def load_observation(
         hdr_count=hdr_count,
         catchup_errors=catchup,
         shard_missing=shard_missing,
+        incomplete=incomplete,
+        schedule_lag_p50_ms=_finite(schedule_lag_p50),
     )
 
 
@@ -425,14 +466,14 @@ def summary_line(state: dict) -> str:
 
 
 def table(state: dict) -> str:
-    rows = ["VALIDITY_TABLE", f"{'run_id':<44} {'status':<6} {'delivery':>8} {'attempted':>9}  marks"]
+    rows = ["VALIDITY_TABLE", f"{'run_id':<52} {'status':<15} {'delivery':>8} {'attempted':>9}  marks"]
     for cell in state.get("cells") or []:
-        marks = " ".join(cell.get("failures") or []) 
+        marks = " ".join(cell.get("failures") or [])
         extra = [flag for flag in (cell.get("flags") or []) if flag not in (cell.get("failures") or [])]
         if extra:
             marks = (marks + " " + " ".join(extra)).strip()
         rows.append(
-            f"{cell.get('run_id', ''):<44} {cell.get('status', ''):<6} "
+            f"{cell.get('run_id', ''):<52} {cell.get('status', ''):<15} "
             f"{float(cell.get('delivery_ratio') or 0):8.3f} {float(cell.get('attempted_ratio') or 0):9.3f}  {marks}"
         )
     rows.append(summary_line(state))

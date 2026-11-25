@@ -400,3 +400,153 @@ def test_cli_kafka_fixture_fails_and_streams_passes(tmp_path: Path):
     )
     assert summary.returncode == 0
     assert "VALIDITY_SUMMARY pass=1 saturated_valid=1 fail=1 total=3 aborted=1" in summary.stdout
+
+
+def smoke2_sharedb_kafka_l2500() -> CellObservation:
+    """Real cell 000 from csa-smoke #2 (20261125T205706Z-0b710e3): genuine ShareDB saturation."""
+    return CellObservation(
+        run_id="000-whiteboard-sharedb-kafka-tuned-L2500-nu1-k1-r0",
+        stage="whiteboard",
+        broker="kafka-tuned",
+        load=2500,
+        nu=1,
+        kill=1,
+        offered_per_sec=2500,
+        attempted_per_sec=2026.4923,
+        delivery_ratio=0.162393,
+        offline_fraction=0.085301,
+        rooms_diverged=25,
+        rooms_total=25,
+        clients_connected=500,
+        clients_expected=500,
+        p50_ms=80609.0,
+        p75_ms=96000.0,
+        p99_ms=108500.0,
+        hdr_p50_ms=80609.0,
+        reservoir_p50_ms=80500.0,
+        sample_span_ms=59_000,
+        duration_s=60,
+        sample_count=10_000,
+        hdr_count=200_000,
+        catchup_errors=0,
+        shard_missing=False,
+        incomplete=False,
+        schedule_lag_p50_ms=5.267,
+    )
+
+
+def test_smoke2_sharedb_saturation_is_saturated_valid_and_does_not_abort(tmp_path: Path):
+    obs = smoke2_sharedb_kafka_l2500()
+    verdict = assess_cell(obs)
+    assert verdict.status == "SATURATED_VALID"
+    assert verdict.failures == []
+    assert "CLIENTS_OFFLINE" in verdict.flags
+    assert "DIVERGED" in verdict.flags
+    assert "ATTEMPTED_BELOW_FLOOR" in verdict.flags
+    assert "CENSORED" not in verdict.flags
+
+    state = empty_state()
+    assert record_cell(state, verdict, fail_fast=True, scheme="sharedb") == 0
+    assert state["aborted"] is False
+
+    # Also verify CLI + validity.json + VALIDITY_SUMMARY on disk for smoke #2 numbers.
+    samples = "room,total_ms,service_ms\n" + "".join("r,80609,80609\n" for _ in range(20))
+    _write_shard(
+        tmp_path,
+        obs.run_id,
+        _summary(
+            config={"WARMUP_S": 5, "DURATION_S": 60},
+            counters={"sent": int(2026.4923 * 65 * (1 - 0.085301)), "skippedWhileOffline": int(2026.4923 * 65 * 0.085301)},
+            load={"offeredPerSec": 2500, "scheduleLagP50Ms": 5.267, "saturated": True},
+            latency={
+                "count": 200_000,
+                "p50Ms": 80609.0,
+                "p75Ms": 96000.0,
+                "p99Ms": 108500.0,
+                "scheduleLagP50Ms": 5.267,
+                "reservoirMinScheduledMs": 1_000,
+                "reservoirMaxScheduledMs": 60_000,
+            },
+            delivery={"ratio": 0.162393},
+            rooms=25,
+            divergedRooms=25,
+            clientsConnected=500,
+            clientsExpected=500,
+        ),
+        samples,
+        log="gateway1 | listening\n",
+    )
+    res = subprocess.run(
+        [
+            sys.executable, str(SCRIPT), "--results", str(tmp_path / "results"), "--cell",
+            "--run-id", obs.run_id, "--stage", "whiteboard", "--broker", "kafka-tuned",
+            "--scheme", "sharedb", "--load", "2500", "--nu", "1", "--kill", "1",
+            "--rooms", "25", "--clients", "20", "--shards", "1", "--fail-fast",
+        ],
+        check=False, capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "SATURATED_VALID" in res.stdout
+    assert "VALIDITY_ABORT" not in res.stdout
+
+    vjson = json.loads((tmp_path / "results" / "validity.json").read_text())
+    assert vjson["aborted"] is False
+    assert vjson["cells"][0]["status"] == "SATURATED_VALID"
+    assert vjson["cells"][0]["schedule_lag_p50_ms"] == 5.267
+
+    summary = subprocess.run(
+        [sys.executable, str(SCRIPT), "--results", str(tmp_path / "results"), "--summary"],
+        check=False, capture_output=True, text=True,
+    )
+    assert summary.returncode == 0
+    assert "SATURATED_VALID" in summary.stdout
+    assert "VALIDITY_SUMMARY pass=0 saturated_valid=1 fail=0 total=1 aborted=0" in summary.stdout
+
+
+def test_harness_fault_cases_still_fail_and_abort():
+    # 1. Loadgen CPU starvation (median generator schedule lag > 250 ms), even with saturated delivery.
+    lag_fault = smoke2_sharedb_kafka_l2500()
+    lag_fault.run_id = "fault-generator-lag"
+    lag_fault.schedule_lag_p50_ms = 320.0
+    lag_verdict = assess_cell(lag_fault)
+    assert lag_verdict.status == "FAIL"
+    assert "GENERATOR_LAG" in lag_verdict.failures
+    assert "ATTEMPTED" in lag_verdict.failures
+    assert record_cell(empty_state(), lag_verdict, fail_fast=True, scheme="sharedb") == 42
+
+    # 2. Loadgen cannot attempt offered load even though SUT delivered cleanly.
+    rate_fault = smoke2_sharedb_kafka_l2500()
+    rate_fault.run_id = "fault-unattempted-no-sut-sat"
+    rate_fault.delivery_ratio = 0.995
+    rate_fault.offline_fraction = 0.0
+    rate_verdict = assess_cell(rate_fault)
+    assert rate_verdict.status == "FAIL"
+    assert "ATTEMPTED" in rate_verdict.failures
+    assert record_cell(empty_state(), rate_verdict, fail_fast=True, scheme="sharedb") == 42
+
+    # 3. Attempted rate collapsed below 50% even under SUT saturation.
+    collapse_fault = smoke2_sharedb_kafka_l2500()
+    collapse_fault.run_id = "fault-attempted-collapse"
+    collapse_fault.attempted_per_sec = 1000.0
+    collapse_verdict = assess_cell(collapse_fault)
+    assert collapse_verdict.status == "FAIL"
+    assert "ATTEMPTED" in collapse_verdict.failures
+    assert record_cell(empty_state(), collapse_verdict, fail_fast=True, scheme="sharedb") == 42
+
+    # 4. Incomplete shard (timeout / partial run).
+    inc_fault = smoke2_sharedb_kafka_l2500()
+    inc_fault.run_id = "fault-incomplete-shard"
+    inc_fault.incomplete = True
+    inc_verdict = assess_cell(inc_fault)
+    assert inc_verdict.status == "FAIL"
+    assert "INCOMPLETE" in inc_verdict.failures
+    assert record_cell(empty_state(), inc_verdict, fail_fast=True, scheme="sharedb") == 42
+
+    # 5. Clients failed to connect at start.
+    conn_fault = smoke2_sharedb_kafka_l2500()
+    conn_fault.run_id = "fault-clients-connected"
+    conn_fault.clients_connected = 450
+    conn_verdict = assess_cell(conn_fault)
+    assert conn_verdict.status == "FAIL"
+    assert "CLIENTS_CONNECTED" in conn_verdict.failures
+    assert record_cell(empty_state(), conn_verdict, fail_fast=True, scheme="sharedb") == 42

@@ -103,6 +103,27 @@ The repository must be public (the instance clones it anonymously at the exact c
 - **bench-results → Run workflow** (empty run id = latest) produces an artifact with `_analysis/*.csv`.
   Locally: `RESULTS_BUCKET=<prefix>-results ./experiments/fetch_results.sh [run_id]`.
 
+## Validity gate (`experiments/validity.py`)
+
+Each cell writes `results/validity.json` and one `VALIDITY` line, summarized at the end by `VALIDITY_TABLE` and `VALIDITY_SUMMARY pass=... saturated_valid=... fail=... total=... aborted=...`.
+
+Outcomes are split strictly between **loadgen/harness health signals** and **SUT saturation**:
+
+- **`PASS`**: all loadgen health checks pass and delivery meets `expected_delivery(offline_fraction) - 0.02`.
+- **`SATURATED_VALID`**: genuine SUT saturation — recorded as a valid measured outcome with all metrics preserved, and the matrix continues (never triggers `VALIDITY_ABORT`). Requires every loadgen health check to pass while `delivery_ratio < (1 - offline_fraction) - 0.02`:
+  1. All expected shard summaries exist (`not shard_missing`) and finished cleanly (`not incomplete`).
+  2. All simulated clients connected at cell start (`clients_connected == clients_expected`).
+  3. Gateway catch-up/reconnect errors in `gateways.log` are within `VALIDITY_CATCHUP_ERROR_MAX` (default `10`).
+  4. Median generator schedule lag stayed healthy (`schedule_lag_p50_ms <= 250.0` ms, matching `apps/load-generator/load-report.ts`), proving the generator event loop was not CPU-starved.
+  5. Generator attempted rate met `SATURATED_ATTEMPTED_FLOOR` (`>= 0.50` when the SUT is saturated and median schedule lag `<= 250 ms`; `ATTEMPTED_BELOW_FLOOR` is flagged when `0.50 <= attempted_ratio < 0.99`).
+- **`FAIL`** (triggers `VALIDITY_ABORT` exit `42` when `VALIDITY_FAIL_FAST=1` on the first cell of a `stage|scheme|broker` group):
+  - `MISSING` / `INCOMPLETE`: missing shard summary or shard marked `incomplete`.
+  - `CLIENTS_CONNECTED`: fewer clients connected than expected.
+  - `GENERATOR_LAG`: `schedule_lag_p50_ms > 250.0` ms (loadgen itself was CPU-starved / falling behind its Poisson schedule).
+  - `ATTEMPTED`: `attempted_ratio < 0.99` when the SUT is not saturated, or `< 0.50` even under saturation.
+  - `CATCHUP_ERRORS`: catch-up/reconnect timeouts in `gateways.log` exceed the threshold.
+  - `SAMPLES_WINDOW`: latency reservoir stopped early despite complete delivery (`delivery_ratio >= 0.99`).
+
 ## Layers of protection against runaway cost
 1. The instance self-terminates 5 minutes after the matrix finishes.
 2. Per-cell `timeout` on the load generator, then a matrix-sized watchdog that uploads logs and powers off.

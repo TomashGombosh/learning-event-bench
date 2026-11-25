@@ -235,18 +235,25 @@ describe('SharedbClient resilience and crash regressions', () => {
 
     const json0 = ShareDBClient.types.defaultType;
     expect(typeof json0.transformX).toBe('function');
+    const jsonParseSpy = jest.spyOn(JSON, 'parse');
     const rnd = seededRandom(42);
     for (let i = 0; i < 200; i++) {
       const a = [{ p: ['text', Math.floor(rnd() * 50)], si: i % 3 === 0 ? 'xy' : 'a' }];
       const b = [{ p: ['text', Math.floor(rnd() * 50)], si: 'b' }];
+      jsonParseSpy.mockClear();
       const [lx, rx] = json0.transformX(a, b);
+      // Fast path must bypass ot-json0 bootstrapTransform/clone (JSON.parse/stringify).
+      expect(jsonParseSpy).not.toHaveBeenCalled();
       expect(lx).toEqual(otJson0.type.transform(a, b, 'left'));
       expect(rx).toEqual(otJson0.type.transform(b, a, 'right'));
     }
-    // Non-si fallback (delete / multi-component).
+    jsonParseSpy.mockClear();
+    // Non-si fallback (delete / multi-component) still delegates to ot-json0 transform.
     const delOp = [{ p: ['text', 2], sd: 'ab' }];
     const insOp = [{ p: ['text', 0], si: 'z' }];
     const [dl, dr] = json0.transformX(delOp, insOp);
+    expect(jsonParseSpy).toHaveBeenCalled();
+    jsonParseSpy.mockRestore();
     expect(dl).toEqual(otJson0.type.transform(delOp, insOp, 'left'));
     expect(dr).toEqual(otJson0.type.transform(insOp, delOp, 'right'));
 
