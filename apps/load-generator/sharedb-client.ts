@@ -132,6 +132,7 @@ export class SharedbClient {
   private inFlightReconnect: Promise<void> | null = null;
   private window: MeasurementWindow = { fromMs: Number.POSITIVE_INFINITY, toMs: Number.POSITIVE_INFINITY };
   private seq = 0;
+  private unexpectedDisconnects = 0;
 
   constructor(
     readonly clientId: string,
@@ -215,6 +216,10 @@ export class SharedbClient {
 
   get isOnline(): boolean {
     return this.online;
+  }
+
+  get unexpectedDisconnectCount(): number {
+    return this.unexpectedDisconnects;
   }
 
   digest(): ReplicaDigest {
@@ -466,6 +471,7 @@ export class SharedbClient {
     this.live = false;
     this.sessionReady = false;
     if (this.intentionalDisconnect || this.closed) return;
+    this.unexpectedDisconnects++;
     if (droppedLiveSession) {
       const failed = this.failover.index;
       this.pendingFailoverFrom = this.gatewayUrls[failed];
