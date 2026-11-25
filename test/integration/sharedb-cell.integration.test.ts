@@ -116,14 +116,13 @@ live('ShareDB cell on real transports', () => {
         );
         right.disconnect();
         left.sendDue(1e15);
+        const disconnectsBeforeKill = left.unexpectedDisconnectCount;
         await first.kill();
-        // The websocket close is async. If we subscribe the offline client
-        // immediately, getOps can run before the killed gateway finishes
-        // in-flight commits and before the surviving client failovers and
-        // resends. Redis Pub/Sub will not replay a message published in
-        // that window. The killed URL is also cooled down for 30s.
+        // The websocket close is async, and fast failover can complete before
+        // `server.close()` resolves. Check either current offline state or a
+        // recorded unexpected disconnect before bringing `right` back online.
         await waitFor(
-          () => !left.isOnline,
+          () => !left.isOnline || left.unexpectedDisconnectCount > disconnectsBeforeKill,
           10_000,
           () => 'left did not observe the gateway kill',
         );

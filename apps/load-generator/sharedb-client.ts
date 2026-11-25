@@ -22,6 +22,7 @@ const SESSION_DOWN_COOLDOWN_MS = 30_000;
 const HANDSHAKE_COOLDOWN_MS = 1_000;
 const RECONNECT_BASE_MS = 200;
 const RECONNECT_MAX_MS = 2_000;
+const CREATE_FALLBACK_MS = 500;
 const reconnectGate = new ConnectGate(32);
 
 interface OpMeta {
@@ -41,6 +42,9 @@ interface ShareDoc {
   create(data: { text: string }, callback: (err?: Error | null) => void): void;
   fetch(callback: (err?: Error | null) => void): void;
   submitOp(op: unknown, options: { source: OpMeta }, callback: (err?: Error | null) => void): void;
+  on(event: string, listener: (...args: unknown[]) => void): void;
+  once(event: string, listener: (...args: unknown[]) => void): void;
+  off(event: string, listener: (...args: unknown[]) => void): void;
 }
 
 interface ShareConnection {
@@ -53,7 +57,12 @@ interface ShareConnection {
 
 let opHookInstalled = false;
 
-/** Remote ops carry timing in `x.source`. ShareDB's doc 'op' event does not. */
+/**
+ * Remote ops carry timing in `x.source`. ShareDB's doc 'op' event does not.
+ * Also install a fast `transformX` path on json0 for single-character text
+ * inserts so backed-up `pendingOps` under saturation do not hit JSON
+ * round-trip cloning O(N^2) CPU on the load generator.
+ */
 function installOpHook(): void {
   if (opHookInstalled) return;
   opHookInstalled = true;
@@ -63,6 +72,42 @@ function installOpHook(): void {
     if (!err && meta && typeof meta.scheduledAtMs === 'number' && this.benchOnRemote) this.benchOnRemote(meta);
     return original.call(this, err, message);
   };
+  const defaultType = ShareDBClient.types?.defaultType;
+  if (defaultType && typeof defaultType.transform === 'function' && !defaultType.transformX) {
+    const origTransform = defaultType.transform.bind(defaultType);
+    defaultType.transformX = function(left: unknown, right: unknown): [unknown, unknown] {
+      if (
+        Array.isArray(left) && Array.isArray(right) &&
+        left.length === 1 && right.length === 1
+      ) {
+        const a = left[0] as { p?: unknown[]; si?: unknown };
+        const b = right[0] as { p?: unknown[]; si?: unknown };
+        if (
+          typeof a?.si === 'string' && typeof b?.si === 'string' &&
+          a.si.length > 0 && b.si.length > 0 &&
+          Array.isArray(a.p) && Array.isArray(b.p) &&
+          a.p.length === 2 && b.p.length === 2 &&
+          a.p[0] === b.p[0] &&
+          typeof a.p[1] === 'number' && typeof b.p[1] === 'number'
+        ) {
+          const key = a.p[0];
+          const pa = a.p[1];
+          const pb = b.p[1];
+          if (pa <= pb) {
+            return [
+              [{ p: [key, pa], si: a.si }],
+              [{ p: [key, pb + a.si.length], si: b.si }],
+            ];
+          }
+          return [
+            [{ p: [key, pa + b.si.length], si: a.si }],
+            [{ p: [key, pb], si: b.si }],
+          ];
+        }
+      }
+      return [origTransform(left, right, 'left'), origTransform(right, left, 'right')];
+    };
+  }
 }
 
 /**
@@ -87,6 +132,7 @@ export class SharedbClient {
   private inFlightReconnect: Promise<void> | null = null;
   private window: MeasurementWindow = { fromMs: Number.POSITIVE_INFINITY, toMs: Number.POSITIVE_INFINITY };
   private seq = 0;
+  private unexpectedDisconnects = 0;
 
   constructor(
     readonly clientId: string,
@@ -172,6 +218,10 @@ export class SharedbClient {
     return this.online;
   }
 
+  get unexpectedDisconnectCount(): number {
+    return this.unexpectedDisconnects;
+  }
+
   digest(): ReplicaDigest {
     return {
       roomId: this.roomId,
@@ -191,7 +241,8 @@ export class SharedbClient {
     this.intentionalDisconnect = true;
     this.online = false;
     this.live = false;
-    this.ws?.close();
+    this.sessionReady = false;
+    this.dropSocket();
     this.connection?.close();
   }
 
@@ -200,17 +251,16 @@ export class SharedbClient {
     return typeof text === 'string' ? text : '';
   }
 
-
   private inWindow(scheduledAtMs: number): boolean {
     return scheduledAtMs >= this.window.fromMs && scheduledAtMs < this.window.toMs;
   }
 
   private eventKey(senderId: string, seq: number): string {
-    return `${this.roomId}	${senderId}	${seq}`;
+    return `${this.roomId}\t${senderId}\t${seq}`;
   }
 
   private skipKey(scheduledAtMs: number): string {
-    return `${this.roomId}	${this.clientId}	skip	${scheduledAtMs}`;
+    return `${this.roomId}\t${this.clientId}\tskip\t${scheduledAtMs}`;
   }
 
   private send(scheduledAtMs: number): void {
@@ -259,18 +309,37 @@ export class SharedbClient {
     }
   }
 
+  private handleDocError(error: unknown): void {
+    const code = (error as { code?: string } | null)?.code;
+    if (code === 'ERR_DOC_ALREADY_CREATED' && (!this.sessionReady || Boolean(this.doc?.type))) {
+      return;
+    }
+    console.error(`ot doc ${this.clientId}`, error);
+  }
+
   private async connect(): Promise<void> {
     this.sessionReady = false;
     this.live = false;
+    if (this.closed || this.intentionalDisconnect) return;
     await reconnectGate.acquire();
     let ws: WebSocket;
     try {
+      if (this.closed || this.intentionalDisconnect) return;
       ws = new WebSocket(sharedbUrl(this.gatewayUrls[this.failover.index]));
+      // Keep an 'error' listener attached from construction through close so
+      // abortHandshake on a CONNECTING socket can never crash the process.
+      ws.on('error', (error) => {
+        this.lastConnectError = error;
+      });
       this.ws = ws;
       ws.on('close', () => {
         if (ws === this.ws) this.onDisconnect();
       });
       await waitUntilOpen(ws, CONNECT_TIMEOUT_MS);
+      if (this.closed || this.intentionalDisconnect) {
+        this.dropSocket();
+        return;
+      }
       const socket = browserSocket(ws);
       if (!this.connection) {
         this.connection = new ShareDBClient.Connection(socket) as ShareConnection;
@@ -280,41 +349,98 @@ export class SharedbClient {
         this.doc = this.connection.get(OT_COLLECTION, this.roomId);
         this.doc.preventCompose = true;
         this.doc.submitSource = true;
+        this.doc.on('error', (error) => {
+          this.handleDocError(error);
+        });
         this.doc.benchOnRemote = (meta) => this.onRemote(meta);
       } else {
         this.connection.bindToSocket(socket);
       }
+    } catch (error) {
+      this.dropSocket();
+      throw error;
     } finally {
       reconnectGate.release();
     }
-    await this.waitSubscribed();
+    try {
+      await this.waitSubscribed(ws);
+    } catch (error) {
+      this.dropSocket();
+      throw error;
+    }
+    if (this.closed || this.intentionalDisconnect) {
+      this.dropSocket();
+      return;
+    }
     this.online = true;
     this.sessionReady = true;
     this.live = true;
   }
 
-  private waitSubscribed(): Promise<void> {
+  private waitSubscribed(ws: WebSocket): Promise<void> {
     const doc = this.doc;
     if (!doc) return Promise.reject(new Error('connect timeout'));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('connect timeout')), CONNECT_TIMEOUT_MS);
-      const fail = (error: Error): void => {
+      let settled = false;
+      let createFallbackTimer: NodeJS.Timeout | null = null;
+      const cleanup = (): void => {
         clearTimeout(timer);
+        if (createFallbackTimer) clearTimeout(createFallbackTimer);
+        ws.off('close', onSocketClose);
+        doc.off('create', onDocCreate);
+      };
+      const fail = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         reject(error);
       };
       const ready = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         // History from this subscribe was applied before the callback. Later ops are live.
         this.live = true;
-        clearTimeout(timer);
         resolve();
       };
+      const onSocketClose = (): void => {
+        fail(new Error('socket closed before subscribe completed'));
+      };
+      const onDocCreate = (): void => {
+        if (doc.type) ready();
+      };
+      const timer = setTimeout(() => fail(new Error('connect timeout')), CONNECT_TIMEOUT_MS);
+      ws.once('close', onSocketClose);
+
+      const createWithFetchFallback = (): void => {
+        if (settled) return;
+        doc.create({ text: '' }, (createErr) => {
+          if (settled) return;
+          if (!createErr || doc.type) return ready();
+          doc.fetch((fetchErr) => (fetchErr || !doc.type ? fail(fetchErr ?? createErr) : ready()));
+        });
+      };
+
       doc.subscribe((err) => {
+        if (settled) return;
         if (err) return fail(err);
         if (doc.type) return ready();
-        doc.create({ text: '' }, (createErr) => {
-          if (!createErr) return ready();
-          doc.fetch((fetchErr) => (fetchErr ? fail(fetchErr) : ready()));
-        });
+        if (this.recipientIndex === 0) {
+          createWithFetchFallback();
+          return;
+        }
+        // Only one client per room creates eagerly; peers receive the create op
+        // on their live subscription, with a fetch/create fallback if needed.
+        doc.once('create', onDocCreate);
+        createFallbackTimer = setTimeout(() => {
+          if (settled) return;
+          if (doc.type) return ready();
+          doc.fetch((fetchErr) => {
+            if (settled) return;
+            if (!fetchErr && doc.type) return ready();
+            createWithFetchFallback();
+          });
+        }, CREATE_FALLBACK_MS);
       });
     });
   }
@@ -323,11 +449,20 @@ export class SharedbClient {
     const socket = this.ws;
     this.ws = null;
     const share = this.connection?.socket;
-    if (socket && socket.readyState !== WebSocket.CLOSED) socket.close();
-    if (share && share.readyState !== WebSocket.CLOSED) {
+    if (share) {
+      const onClose = share.onclose;
+      const wasClosed = share.readyState === WebSocket.CLOSED;
+      // Detach handlers before notifying ShareDB of disconnect so late frames
+      // on the closing WebSocket cannot reach Doc._handleSubscribe after
+      // inflightSubscribe has been cleared.
+      share.onmessage = null;
+      share.onopen = null;
+      share.onerror = null;
+      share.onclose = null;
       share.readyState = WebSocket.CLOSED;
-      share.onclose?.('disconnected');
+      if (!wasClosed) onClose?.('disconnected');
     }
+    if (socket && socket.readyState !== WebSocket.CLOSED) socket.close();
   }
 
   private onDisconnect(): void {
@@ -336,6 +471,7 @@ export class SharedbClient {
     this.live = false;
     this.sessionReady = false;
     if (this.intentionalDisconnect || this.closed) return;
+    this.unexpectedDisconnects++;
     if (droppedLiveSession) {
       const failed = this.failover.index;
       this.pendingFailoverFrom = this.gatewayUrls[failed];

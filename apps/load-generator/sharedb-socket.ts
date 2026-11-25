@@ -23,20 +23,27 @@ export function sharedbUrl(httpUrl: string): string {
 export function browserSocket(ws: WebSocket): ShareSocket {
   const socket: ShareSocket = {
     readyState: ws.readyState,
-    send(data: string) { ws.send(data); },
-    close() { ws.close(); },
+    send(data: string) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    },
+    close() {
+      if (ws.readyState !== WebSocket.CLOSED) ws.close();
+    },
     onmessage: null,
     onopen: null,
     onclose: null,
     onerror: null,
   };
-  ws.on('message', (data) => socket.onmessage?.({ data: data.toString() }));
+  ws.on('message', (data) => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    socket.onmessage?.({ data: data.toString() });
+  });
   ws.on('open', () => {
     socket.readyState = ws.readyState;
     socket.onopen?.();
   });
   ws.on('close', () => {
-    socket.readyState = 3;
+    socket.readyState = WebSocket.CLOSED;
     // Not 'closed': ShareDB treats that as a permanent client close.
     socket.onclose?.('disconnected');
   });
@@ -46,6 +53,9 @@ export function browserSocket(ws: WebSocket): ShareSocket {
 
 export function waitUntilOpen(ws: WebSocket, timeoutMs: number): Promise<void> {
   if (ws.readyState === WebSocket.OPEN) return Promise.resolve();
+  if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+    return Promise.reject(new Error('socket closed before open'));
+  }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup();
@@ -55,6 +65,7 @@ export function waitUntilOpen(ws: WebSocket, timeoutMs: number): Promise<void> {
       clearTimeout(timer);
       ws.off('open', onOpen);
       ws.off('error', onError);
+      ws.off('close', onClose);
     };
     const onOpen = (): void => {
       cleanup();
@@ -64,7 +75,12 @@ export function waitUntilOpen(ws: WebSocket, timeoutMs: number): Promise<void> {
       cleanup();
       reject(error);
     };
+    const onClose = (): void => {
+      cleanup();
+      reject(new Error('socket closed before open'));
+    };
     ws.once('open', onOpen);
     ws.once('error', onError);
+    ws.once('close', onClose);
   });
 }
