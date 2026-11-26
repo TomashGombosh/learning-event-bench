@@ -56,12 +56,18 @@ interface ShareConnection {
 }
 
 let opHookInstalled = false;
+const FAST_TRANSFORM_X = Symbol('fastTransformX');
+
+type TaggedTransformX = ((left: unknown, right: unknown) => [unknown, unknown]) & {
+  [FAST_TRANSFORM_X]?: boolean;
+};
 
 /**
  * Remote ops carry timing in `x.source`. ShareDB's doc 'op' event does not.
- * Also install a fast `transformX` path on json0 for single-character text
- * inserts so backed-up `pendingOps` under saturation do not hit JSON
- * round-trip cloning O(N^2) CPU on the load generator.
+ * Also override `ot-json0`'s `bootstrapTransform` `transformX` (which already
+ * exists on `defaultType` and deep-clones ops via JSON.parse/stringify) with
+ * a fast path for single-key text inserts so backed-up `pendingOps` under
+ * saturation do not pin loadgen CPU.
  */
 function installOpHook(): void {
   if (opHookInstalled) return;
@@ -73,9 +79,9 @@ function installOpHook(): void {
     return original.call(this, err, message);
   };
   const defaultType = ShareDBClient.types?.defaultType;
-  if (defaultType && typeof defaultType.transform === 'function' && !defaultType.transformX) {
+  if (defaultType && typeof defaultType.transform === 'function' && !(defaultType.transformX as TaggedTransformX | undefined)?.[FAST_TRANSFORM_X]) {
     const origTransform = defaultType.transform.bind(defaultType);
-    defaultType.transformX = function(left: unknown, right: unknown): [unknown, unknown] {
+    const fastTransformX: TaggedTransformX = function(left: unknown, right: unknown): [unknown, unknown] {
       if (
         Array.isArray(left) && Array.isArray(right) &&
         left.length === 1 && right.length === 1
@@ -107,6 +113,8 @@ function installOpHook(): void {
       }
       return [origTransform(left, right, 'left'), origTransform(right, left, 'right')];
     };
+    fastTransformX[FAST_TRANSFORM_X] = true;
+    defaultType.transformX = fastTransformX;
   }
 }
 

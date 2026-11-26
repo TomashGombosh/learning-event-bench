@@ -61,7 +61,7 @@ emit_cell_summary() {
 import json, sys
 from pathlib import Path
 sys.path.insert(0, "experiments")
-from validity import broker_saturated, loss_explained_by_offline
+from validity import SCHEDULE_LAG_P50_MAX_MS, broker_saturated, loss_explained_by_offline
 run_id, broker, nominal_s, shards_s, rooms_s, failed_s = sys.argv[1:7]
 nominal = float(nominal_s)
 expected = min(int(rooms_s), int(shards_s))
@@ -87,7 +87,11 @@ def window_s(summary):
 
 attempted = sent = skipped = 0.0
 ratios = []
+lag_p50 = 0.0
+incomplete = False
 for summary in summaries:
+    if bool(summary.get("incomplete")):
+        incomplete = True
     counters = summary.get("counters") or {}
     sent += float(counters.get("sent", 0))
     skipped += float(counters.get("skippedWhileOffline", 0))
@@ -95,6 +99,9 @@ for summary in summaries:
     delivery = summary.get("delivery") or {}
     if "ratio" in delivery:
         ratios.append(float(delivery["ratio"]))
+    lat = summary.get("latency") or {}
+    load_blk = summary.get("load") or {}
+    lag_p50 = max(lag_p50, float(lat.get("scheduleLagP50Ms") or load_blk.get("scheduleLagP50Ms") or 0))
 p50 = max(float(s["latency"]["p50Ms"] or 0) for s in summaries)
 p99 = max(float(s["latency"]["p99Ms"] or 0) for s in summaries)
 rooms_diverged = sum(int(s.get("divergedRooms", 0)) for s in summaries)
@@ -105,16 +112,23 @@ offline_frac = skipped / (sent + skipped) if (sent + skipped) else 0.0
 delivery_ratio = min(ratios) if ratios else 0.0
 attempted_ratio = (attempted / nominal) if nominal > 0 else 1.0
 generator_short = nominal > 0 and attempted_ratio < 0.99
-# Same predicate as experiments/validity.py: delivery vs (1 - offline) - 0.02, every broker.
+# Same predicate as experiments/validity.py: loadgen healthy and delivery below (1 - offline) - 0.02.
 saturated = (
     bool(ratios) and not missing
-    and broker_saturated(delivery_ratio, offline_frac, attempted_ratio)
+    and broker_saturated(
+        delivery_ratio,
+        offline_frac,
+        attempted_ratio,
+        shard_missing=missing,
+        incomplete=incomplete,
+        schedule_lag_p50_ms=lag_p50,
+    )
 )
 explained = bool(ratios) and loss_explained_by_offline(delivery_ratio, offline_frac)
-if missing or generator_short:
-    flags.append("SATURATED")
-elif saturated:
+if saturated:
     flags.append("SATURATED_VALID")
+elif missing or incomplete or generator_short or lag_p50 > SCHEDULE_LAG_P50_MAX_MS:
+    flags.append("SATURATED")
 if offline_frac > 0.05 or explained:
     flags.append("CLIENTS_OFFLINE")
 if rooms_diverged > 0:

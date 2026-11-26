@@ -63,7 +63,11 @@ def load_runs(results: Path, matrix: Path) -> tuple[pd.DataFrame, dict[str, np.n
         # tolerance stays in the latency tables and is not a saturation point.
         explained = bool(ratios) and loss_explained_by_offline(float(delivery_ratio), offline)
         censored = bool(ratios) and float(delivery_ratio) < 0.99 and not explained
-        saturated_valid = bool(ratios) and broker_saturated(float(delivery_ratio), offline, attempted_ratio)
+        lag_p50 = max(float((s.get("latency") or {}).get("scheduleLagP50Ms") or (s.get("load") or {}).get("scheduleLagP50Ms") or 0) for s in summaries)
+        incomplete = any(bool(s.get("incomplete")) for s in summaries)
+        saturated_valid = bool(ratios) and broker_saturated(
+            float(delivery_ratio), offline, attempted_ratio, incomplete=incomplete, schedule_lag_p50_ms=lag_p50
+        )
         runs.append(dict({k: v for k, v in row._asdict().items() if k != "Index"}, n_samples=len(lat),
                          p50=hdr("p50Ms"), p95=hdr("p95Ms"), p99=hdr("p99Ms"), mean=hdr("meanMs"),
                          rooms_total=len(rm),
